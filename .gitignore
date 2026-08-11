@@ -1,0 +1,4 @@
+*.log
+cfg_*.txt
+state_*.json
+stock_*.json
