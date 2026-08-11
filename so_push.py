@@ -20,8 +20,22 @@ import sys, os, struct, json, datetime, hashlib, urllib.request, urllib.error, t
 
 # ---------- pure-python DBF reader (โครงเดียวกับ sopo_live_feeder.py ที่พิสูจน์แล้ว) ----------
 def read_dbf(path, fields=None, encoding="cp874"):
-    with open(path, "rb") as f:
-        hdr = f.read(32)
+    # Google Drive FileProvider บางครั้งคืน PermissionError/OSError(EDEADLK) ชั่วขณะ
+    # ตอน daemon (launchd) เพิ่งเปิดไฟล์ครั้งแรก — retry เฉพาะจุด open+header เท่านั้น
+    f = None
+    for attempt in range(5):
+        try:
+            f = open(path, "rb")
+            hdr = f.read(32)
+            break
+        except (PermissionError, OSError):
+            if f:
+                f.close()
+                f = None
+            if attempt == 4:
+                raise
+            time.sleep(2)
+    with f:
         nrec = struct.unpack("<I", hdr[4:8])[0]
         hdrlen = struct.unpack("<H", hdr[8:10])[0]
         reclen = struct.unpack("<H", hdr[10:12])[0]
