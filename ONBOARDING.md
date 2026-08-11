@@ -64,3 +64,28 @@ seed `hr_holidays` (Pond ส่งรายการวันหยุด 2569) 
 2. Add shortcut `All_on_Cloud` + ตั้ง `AutoExport` offline (Google Drive Desktop)
 3. clone `prod-feeder` → ทำ **งาน A (feeder)** ให้จบก่อน (ข้อมูลผลิตจะได้สด)
 4. ต่อ B (Kilo รูป) → C (FieldLog) → คุย D (SOPO) กับ Pond
+
+---
+
+# 🚨 CRITICAL — อ่านก่อนทำต่อ (จากเครื่องเก่า kritsada@ ส่งต่อ 2026-08-11)
+
+**กันข้อมูลซ้ำ/พัง:**
+- **Kilo: record 653 งานย้ายเข้า `kilo_job` ครบแล้ว → ห้ามรัน `import_legacy.py` ซ้ำ** (INSERT ไม่กันซ้ำ = เบิ้ล 1,306) เหลือแค่รูป `sync_photos.py`
+- **Supabase กลางใช้ร่วม 7 แอพ → DDL เพิ่ม (additive) เท่านั้น ห้าม drop/alter/ลบตารางเดิม** เช็คก่อนว่าตารางไม่ใช่ของแอพอื่น
+- **FieldLog importer**: ตาราง fl_usage/trip/fuel/wo/inspect ว่างอยู่ (insert ปลอดภัย) · `fl_asset` มี 53 แล้ว → แก้ detail ต้อง **UPDATE/upsert ไม่ใช่ insert** · เช็ค count ก่อน-หลังทุกครั้ง
+- **แอพเก่า Kilo/FieldLog/SOPO ยัง live เขียนทุกวัน → อย่าตัดสวิตช์จนกว่า verify ครบ + Pond เห็นชอบ**
+
+**กัน deploy พัง:**
+- git author = **GH007-LAB <299744317+GH007-LAB@users.noreply.github.com>** เท่านั้น (ไม่งั้น Vercel Deployment Blocked)
+- push = deploy จริงทันที (Vercel + GitHub Pages) · production = จอหน้างานโรงงาน live → test/build ก่อน push
+- git push บางครั้งโดน auto-classifier block → แยก commit ก่อน แล้ว push + retry
+
+**Supabase:**
+- DDL/RLS/policy → เตรียม SQL ให้ **Pond กด Run เอง** (อย่ารันเอง) · paste เข้า SQL editor ปกติไม่ติด → `window.monaco.editor.getEditors()[0].setValue(sql)` ผ่าน browser tool
+- service_role ห้าม commit · anon key = public ใส่โค้ดได้
+- supabase-py `.upsert()` → ส่ง dict ตรง ๆ **ห้าม json.dumps ค่า jsonb เอง** (string ซ้อน พังฝั่ง JS)
+
+**บริบท:**
+- `so_live`/`coil_stock` = snapshot ค้าง จนกว่า feeder รัน (งาน A) → เช็ค `synced_at` ว่าสด ไม่ใช่แค่นับแถว
+- 2 Supabase: กลาง `syvfdbvmwaeyokytckwb` = ปลายทาง · `dbbhgacstsddonprgiuo` = production เก่า เก็บไว้ rollback **อย่าลบ**
+- **เครื่องเก่า (kritsada@) หยุดเขียน repo/Supabase แล้ว → เครื่อง CTO เป็นเจ้าของงานคนเดียว ไม่มีใครชน**
