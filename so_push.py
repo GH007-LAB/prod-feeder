@@ -19,73 +19,74 @@ state/log เก็บที่ %LOCALAPPDATA%\\007so_push\\ (ไม่ปนโ
 import sys, os, struct, json, datetime, hashlib, urllib.request, urllib.error, time
 
 # ---------- pure-python DBF reader (โครงเดียวกับ sopo_live_feeder.py ที่พิสูจน์แล้ว) ----------
-def read_dbf(path, fields=None, encoding="cp874"):
+def _read_file_retry(path, attempts=8, delay=3):
     # Google Drive FileProvider บางครั้งคืน PermissionError/OSError(EDEADLK) ชั่วขณะ
-    # ตอน daemon (launchd) เพิ่งเปิดไฟล์ครั้งแรก — retry เฉพาะจุด open+header เท่านั้น
-    f = None
-    for attempt in range(5):
+    # (daemon เพิ่งเปิดไฟล์ครั้งแรก, หรือ Drive กำลัง cold-start) — อ่านทั้งไฟล์เข้า memory
+    # เป็นก้อนเดียว แล้ว retry ทั้งก้อนถ้าพัง กันไม่ให้ deadlock โผล่กลางทางระหว่าง parse
+    for attempt in range(attempts):
         try:
-            f = open(path, "rb")
-            hdr = f.read(32)
-            break
+            with open(path, "rb") as f:
+                return f.read()
         except (PermissionError, OSError):
-            if f:
-                f.close()
-                f = None
-            if attempt == 4:
+            if attempt == attempts - 1:
                 raise
-            time.sleep(2)
-    with f:
-        nrec = struct.unpack("<I", hdr[4:8])[0]
-        hdrlen = struct.unpack("<H", hdr[8:10])[0]
-        reclen = struct.unpack("<H", hdr[10:12])[0]
-        fdefs = []
-        nfields = (hdrlen - 33) // 32
-        for _ in range(nfields):
-            fd = f.read(32)
-            if fd[0:1] == b"\r":
-                break
-            name = fd[0:11].split(b"\x00")[0].decode("ascii", "replace")
-            ftype = fd[11:12].decode("ascii", "replace")
-            flen = fd[16]
-            fdefs.append((name, ftype, flen))
-        f.seek(hdrlen)
-        for _ in range(nrec):
-            rec = f.read(reclen)
-            if len(rec) < reclen:
-                break
-            if rec[0:1] == b"*":
+            time.sleep(delay)
+
+def read_dbf(path, fields=None, encoding="cp874"):
+    buf = _read_file_retry(path)
+    nrec = struct.unpack("<I", buf[4:8])[0]
+    hdrlen = struct.unpack("<H", buf[8:10])[0]
+    reclen = struct.unpack("<H", buf[10:12])[0]
+    fdefs = []
+    nfields = (hdrlen - 33) // 32
+    pos0 = 32
+    for _ in range(nfields):
+        fd = buf[pos0:pos0 + 32]
+        pos0 += 32
+        if fd[0:1] == b"\r":
+            break
+        name = fd[0:11].split(b"\x00")[0].decode("ascii", "replace")
+        ftype = fd[11:12].decode("ascii", "replace")
+        flen = fd[16]
+        fdefs.append((name, ftype, flen))
+    off = hdrlen
+    for _ in range(nrec):
+        rec = buf[off:off + reclen]
+        off += reclen
+        if len(rec) < reclen:
+            break
+        if rec[0:1] == b"*":
+            continue
+        row, pos = {}, 1
+        for name, ftype, flen in fdefs:
+            raw = rec[pos:pos + flen]
+            pos += flen
+            if fields is not None and name not in fields:
                 continue
-            row, pos = {}, 1
-            for name, ftype, flen in fdefs:
-                raw = rec[pos:pos + flen]
-                pos += flen
-                if fields is not None and name not in fields:
-                    continue
-                if ftype in ("N", "F"):
-                    s = raw.strip()
+            if ftype in ("N", "F"):
+                s = raw.strip()
+                try:
+                    row[name] = float(s) if s else 0.0
+                except ValueError:
+                    row[name] = 0.0
+            elif ftype == "B":         # VFP double (8-byte LE)
+                row[name] = struct.unpack("<d", raw)[0] if len(raw) == 8 else 0.0
+            elif ftype == "I":         # VFP int32
+                row[name] = struct.unpack("<i", raw)[0] if len(raw) == 4 else 0
+            elif ftype == "Y":         # VFP currency
+                row[name] = struct.unpack("<q", raw)[0] / 10000.0 if len(raw) == 8 else 0.0
+            elif ftype == "D":
+                s = raw.strip()
+                if len(s) == 8 and s.isdigit():
                     try:
-                        row[name] = float(s) if s else 0.0
+                        row[name] = datetime.date(int(s[:4]), int(s[4:6]), int(s[6:8]))
                     except ValueError:
-                        row[name] = 0.0
-                elif ftype == "B":         # VFP double (8-byte LE)
-                    row[name] = struct.unpack("<d", raw)[0] if len(raw) == 8 else 0.0
-                elif ftype == "I":         # VFP int32
-                    row[name] = struct.unpack("<i", raw)[0] if len(raw) == 4 else 0
-                elif ftype == "Y":         # VFP currency
-                    row[name] = struct.unpack("<q", raw)[0] / 10000.0 if len(raw) == 8 else 0.0
-                elif ftype == "D":
-                    s = raw.strip()
-                    if len(s) == 8 and s.isdigit():
-                        try:
-                            row[name] = datetime.date(int(s[:4]), int(s[4:6]), int(s[6:8]))
-                        except ValueError:
-                            row[name] = None
-                    else:
                         row[name] = None
                 else:
-                    row[name] = raw.decode(encoding, "replace").strip()
-            yield row
+                    row[name] = None
+            else:
+                row[name] = raw.decode(encoding, "replace").strip()
+        yield row
 
 # ---------- helpers ----------
 def log(msg):
@@ -145,16 +146,17 @@ def chunks(lst, n):
 
 # ---------- v2: สต็อคคอยล์ ZZC -> coil_stock ----------
 def read_dbf_fieldnames(path):
-    with open(path, "rb") as f:
-        hdr = f.read(32)
-        hdrlen = struct.unpack("<H", hdr[8:10])[0]
-        names = []
-        for _ in range((hdrlen - 33) // 32):
-            fd = f.read(32)
-            if fd[0:1] == b"\r":
-                break
-            names.append(fd[0:11].split(b"\x00")[0].decode("ascii", "replace"))
-        return names
+    buf = _read_file_retry(path)
+    hdrlen = struct.unpack("<H", buf[8:10])[0]
+    names = []
+    pos0 = 32
+    for _ in range((hdrlen - 33) // 32):
+        fd = buf[pos0:pos0 + 32]
+        pos0 += 32
+        if fd[0:1] == b"\r":
+            break
+        names.append(fd[0:11].split(b"\x00")[0].decode("ascii", "replace"))
+    return names
 
 def push_stock(cfg, branch, src, now_iso, dry):
     # หาไฟล์ master สต็อคของ Express + ฟิลด์ยอดคงเหลือ (ตรวจชื่อฟิลด์จริงตอนรัน — ต่างเวอร์ชันชื่อไม่เหมือนกัน)
