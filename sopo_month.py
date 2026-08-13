@@ -109,7 +109,7 @@ def main():
     def pm(sc, mk):
         return person_m.setdefault((sc, mk), {
             "net_sales": 0.0, "bill_count": 0, "big_deal_value": 0.0, "big_deal_count": 0,
-            "return_value": 0.0, "so_value": 0.0,
+            "return_value": 0.0, "so_value": 0.0, "gp_value": 0.0, "gp_base": 0.0,
         })
 
     for r in S.read_dbf(os.path.join(src, "ARTRN.DBF"),
@@ -156,6 +156,34 @@ def main():
                 if cd >= 0:
                     b["cycle_days_sum"] += cd
                     b["cycle_days_n"] += 1
+
+    # GP% จริง — STCRD.DBF (stock ledger): XUNITPR = ต้นทุนต่อหน่วย ณ เวลาขาย
+    # (ยืนยันจากข้อมูลจริงแล้ว — LOTVAL/LUNITPR ที่คิดว่าจะใช้ได้ กลับเป็น 0 เสมอ ไม่ได้ใช้จริง)
+    # เฉพาะแถวที่ DOCNUM ขึ้นต้น IV/HS (ตรงกับนิยาม "ขายจริง" เดียวกับ ARTRN RECTYP 1/3)
+    # และ XUNITPR>0 เท่านั้น (สินค้าบางตัวไม่มีต้นทุนแยก เช่น อุปกรณ์เสริมที่รวมในแผ่นหลัก — ข้ามทั้ง 2 ฝั่ง กันดันมาร์จิ้นเพี้ยน)
+    for r in S.read_dbf(os.path.join(src, "STCRD.DBF"),
+                        fields={"DOCNUM", "DOCDAT", "SLMCOD", "TRNQTY", "UNITPR", "TRNVAL", "XUNITPR"}):
+        doc = (r.get("DOCNUM") or "").strip()
+        if not (doc.startswith("IV") or doc.startswith("HS")):
+            continue
+        dat = r.get("DOCDAT")
+        if not dat or dat < cutoff:
+            continue
+        mk = month_key(dat)
+        if mk not in keep_months:
+            continue
+        xunitpr = float(r.get("XUNITPR") or 0)
+        if xunitpr <= 0:
+            continue
+        sc = (r.get("SLMCOD") or "").strip()
+        if not sc:
+            continue
+        qty = float(r.get("TRNQTY") or 0)
+        unitpr = float(r.get("UNITPR") or 0)
+        trnval = float(r.get("TRNVAL") or 0)
+        p = pm(sc, mk)
+        p["gp_value"] += qty * (unitpr - xunitpr)
+        p["gp_base"] += trnval
 
     # so_value ต่อเซลล์ (lead-axis proxy แบบง่าย = มูลค่า SO ที่ SLMCOD คนนั้นออกเดือนนี้)
     for r in S.read_dbf(os.path.join(src, "OESO.DBF"), fields={"SODAT", "SLMCOD", "NETAMT"}):
