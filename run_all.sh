@@ -19,5 +19,6 @@ for b in SKN BK PPS; do
       "$b" "$DRIVE_ROOT" "$b" "$SUPABASE_URL" "$SUPABASE_KEY" "$WINDOW_DAYS" > "$cf"
   fi
   /usr/bin/python3 "$DIR/so_push.py" "$cf" >> "$LOG" 2>&1
+  /usr/bin/python3 "$DIR/sopo_month.py" "$cf" >> "$LOG" 2>&1
 done
 echo "$(date '+%Y-%m-%d %H:%M:%S') DONE" >> "$LOG"
