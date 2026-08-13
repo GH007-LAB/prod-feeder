@@ -17,9 +17,10 @@
 ```bash
 git clone https://github.com/GH007-LAB/prod-feeder.git ~/prod-feeder
 cd ~/prod-feeder
+cp feeder.env.example feeder.env   # feeder.env ไม่ commit (มี PROXY_TOKEN ต่อเครื่อง) — .gitignore ไว้แล้ว
 # หา path จริงของ AutoExport บนเครื่องนี้:
 ls ~/Library/CloudStorage/GoogleDrive-cto@007metals.com/"My Drive"/All_on_Cloud/AutoExport
-# แก้บรรทัด DRIVE_ROOT= ใน feeder.env ให้ตรง path ข้างบน
+# แก้ PROXY_URL/PROXY_TOKEN (หรือ DRIVE_ROOT ถ้าย้อนกลับไป local mount) ใน feeder.env ให้ตรงเครื่อง
 nano feeder.env
 ```
 
@@ -45,7 +46,7 @@ python3 so_push.py <(printf "BRANCH=SKN\nSRC=$DRIVE_ROOT/SKN\nSUPABASE_URL=$SUPA
 | ไฟล์ | หน้าที่ |
 |---|---|
 | `so_push.py` | feeder จริง (SO+item+coil ในตัว, pure Python) |
-| `feeder.env` | ⚙️ ตั้งค่าต่อเครื่อง: **DRIVE_ROOT** + Supabase กลาง |
+| `feeder.env.example` | เทมเพลต — `cp` เป็น `feeder.env` แล้วแก้ต่อเครื่อง (ไม่ commit เพราะมี `PROXY_TOKEN`) |
 | `run_all.sh` | รันทั้ง 3 สาขา + log |
 | `install.sh` / `uninstall.sh` | ติดตั้ง/ปิด launchd |
 

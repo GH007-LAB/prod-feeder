@@ -25,7 +25,7 @@ ls ~/Library/CloudStorage/GoogleDrive-cto@007metals.com/"My Drive"/All_on_Cloud/
 ```bash
 git clone https://github.com/GH007-LAB/prod-feeder.git ~/prod-feeder && cd ~/prod-feeder
 ```
-- [ ] แก้ `DRIVE_ROOT=` ใน `feeder.env` ให้เป็น path จากข้อ 1 (ลงท้าย `.../All_on_Cloud/AutoExport`)
+- [ ] `cp feeder.env.example feeder.env` แล้วแก้ `PROXY_URL`/`PROXY_TOKEN` (หรือ `DRIVE_ROOT=` เป็น path จากข้อ 1 ถ้าใช้ local mount แทน — ลงท้าย `.../All_on_Cloud/AutoExport`) — `feeder.env` ไม่ commit
 - [ ] ทดสอบ 1 รอบ + ดู log:
 ```bash
 ./run_all.sh && tail -20 ~/007so_push/feeder.log
