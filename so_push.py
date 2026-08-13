@@ -16,10 +16,58 @@ config file (KEY=VALUE):
 
 state/log เก็บที่ %LOCALAPPDATA%\\007so_push\\ (ไม่ปนโฟลเดอร์ Drive)
 """
-import sys, os, struct, json, datetime, hashlib, urllib.request, urllib.error, time
+import sys, os, struct, json, datetime, hashlib, base64, urllib.request, urllib.error, urllib.parse, time
+
+# ---------- Drive proxy mode (Apps Script) — เลี่ยง local FileProvider mount ----------
+# macOS FileProvider (Google Drive Desktop) อ่านไม่ได้จาก background daemon (launchd/cron)
+# ไม่ว่าจะให้ Full Disk Access ยังไง — ต้องดึงผ่าน HTTPS แทน (ดู CTO_SETUP.md)
+PROXY = {}  # set in main(): {'url':..., 'token':..., 'branch':...} ถ้าตั้ง PROXY_URL ใน config
+# Apps Script โหลดไฟล์เต็มจาก Drive ทุก request อยู่ดี (ไม่มี state ข้าม invocation) — แบ่ง chunk เล็ก
+# มีแต่เสีย (ยิงซ้ำหลายรอบ) ตั้งให้ใหญ่พอที่ไฟล์ปัจจุบันทั้งหมด (~22MB) จบในคำขอเดียว
+# ยังกัน chunk loop ไว้เป็น safety net เผื่อไฟล์ในอนาคตใหญ่กว่านี้
+PROXY_CHUNK = 40 * 1024 * 1024
+
+def _proxy_get(params, attempts=5, delay=3, timeout=60):
+    qs = "&".join("%s=%s" % (k, urllib.parse.quote(str(v), safe="")) for k, v in params.items())
+    url = PROXY["url"] + "?" + qs
+    for attempt in range(attempts):
+        try:
+            with urllib.request.urlopen(url, timeout=timeout) as resp:
+                return resp.read()
+        except (urllib.error.URLError, OSError) as e:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(delay)
+
+def _fetch_via_proxy(filename):
+    base_params = {"token": PROXY["token"], "branch": PROXY["branch"], "file": filename}
+    meta = json.loads(_proxy_get(dict(base_params, action="meta")))
+    size = meta["size"]
+    parts = []
+    offset = 0
+    while offset < size:
+        b64 = _proxy_get(dict(base_params, offset=offset, length=PROXY_CHUNK))
+        parts.append(base64.b64decode(b64))
+        offset += PROXY_CHUNK
+    return b"".join(parts)
+
+def _proxy_exists(filename):
+    try:
+        meta = json.loads(_proxy_get({"token": PROXY["token"], "branch": PROXY["branch"],
+                                       "file": filename, "action": "meta"}, attempts=3, delay=2))
+        return "size" in meta
+    except Exception:
+        return False
+
+def _file_exists(path):
+    if PROXY:
+        return _proxy_exists(os.path.basename(path))
+    return os.path.exists(path)
 
 # ---------- pure-python DBF reader (โครงเดียวกับ sopo_live_feeder.py ที่พิสูจน์แล้ว) ----------
 def _read_file_retry(path, attempts=8, delay=3):
+    if PROXY:
+        return _fetch_via_proxy(os.path.basename(path))
     # Google Drive FileProvider บางครั้งคืน PermissionError/OSError(EDEADLK) ชั่วขณะ
     # (daemon เพิ่งเปิดไฟล์ครั้งแรก, หรือ Drive กำลัง cold-start) — อ่านทั้งไฟล์เข้า memory
     # เป็นก้อนเดียว แล้ว retry ทั้งก้อนถ้าพัง กันไม่ให้ deadlock โผล่กลางทางระหว่าง parse
@@ -101,9 +149,10 @@ def load_config(path):
                 continue
             k, v = line.split("=", 1)
             cfg[k.strip().upper()] = v.strip()
-    for k in ("BRANCH", "SRC"):
-        if not cfg.get(k):
-            raise SystemExit("config missing " + k)
+    if not cfg.get("BRANCH"):
+        raise SystemExit("config missing BRANCH")
+    if not cfg.get("SRC") and not cfg.get("PROXY_URL"):
+        raise SystemExit("config missing SRC (or PROXY_URL for proxy mode)")
     return cfg
 
 def state_dir():
@@ -163,7 +212,7 @@ def push_stock(cfg, branch, src, now_iso, dry):
     path = None
     for c in ("STMAS.DBF", "ICMAS.DBF", "STOCK.DBF"):
         p = os.path.join(src, c)
-        if os.path.exists(p):
+        if _file_exists(p):
             path = p
             break
     if not path:
@@ -207,7 +256,9 @@ def main():
     cfg = load_config(sys.argv[1])
     dry = ("--dry" in sys.argv) or not cfg.get("SUPABASE_URL") or not cfg.get("SUPABASE_KEY")
     branch = cfg["BRANCH"]
-    src = cfg["SRC"]
+    src = cfg.get("SRC", "")
+    if cfg.get("PROXY_URL"):
+        PROXY.update(url=cfg["PROXY_URL"], token=cfg.get("PROXY_TOKEN", ""), branch=branch)
     window = int(cfg["WINDOW_DAYS"])
     today = datetime.date.today()
     cutoff = today - datetime.timedelta(days=window)
@@ -221,8 +272,8 @@ def main():
     open(lock, "w").write(str(os.getpid()))
 
     try:
-        if not os.path.exists(os.path.join(src, "OESO.DBF")):
-            raise SystemExit("source not found: " + src)
+        if not _file_exists(os.path.join(src, "OESO.DBF")):
+            raise SystemExit("source not found: " + (PROXY.get("url") or src))
 
         # ---- v2: สต็อคคอยล์ ZZC (พังได้โดยไม่กระทบ SO push) ----
         try:
