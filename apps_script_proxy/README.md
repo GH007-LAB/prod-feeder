@@ -51,6 +51,9 @@ curl "https://script.google.com/macros/s/XXXXX/exec?token=YOUR_TOKEN&branch=SKN&
 - `?token=...&branch=SKN&file=OESO.DBF&action=meta` → `{"size": N}`
 - `?token=...&branch=SKN&file=OESO.DBF` → base64 ของไฟล์ (offset=0, length=ค่า default `CHUNK_BYTES`)
 - `?token=...&branch=SKN&file=OESO.DBF&offset=N&length=M` → base64 ของช่วง byte [N, N+M)
+- `?token=...&fileId=<Drive file id>[&action=meta|&offset=N&length=M]` → เหมือนข้างบนแต่ดึงไฟล์ตรงด้วย
+  Drive file id แทน branch+file — ใช้กับไฟล์ที่ไม่ได้อยู่ใต้ `AutoExport/{branch}` เช่น
+  `report_scores.csv` ของ Finny (ต้องแชร์ไฟล์นั้นให้บัญชีที่รัน Apps Script นี้เห็นด้วย)
 
 ## Gotcha
 

@@ -21,4 +21,6 @@ for b in SKN BK PPS; do
   /usr/bin/python3 "$DIR/so_push.py" "$cf" >> "$LOG" 2>&1
   /usr/bin/python3 "$DIR/sopo_month.py" "$cf" >> "$LOG" 2>&1
 done
+# Finny (report_scores.csv) — ไฟล์เดียวใช้ร่วมทุกสาขา รันครั้งเดียวต่อรอบ (ใช้ cfg ล่าสุดจาก loop บน)
+/usr/bin/python3 "$DIR/finny_sync.py" "$cf" >> "$LOG" 2>&1
 echo "$(date '+%Y-%m-%d %H:%M:%S') DONE" >> "$LOG"

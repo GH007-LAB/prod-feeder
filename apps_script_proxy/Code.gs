@@ -25,13 +25,19 @@ function doGet(e) {
     return ContentService.createTextOutput('forbidden').setMimeType(ContentService.MimeType.TEXT);
   }
 
-  var branch = e.parameter.branch;
-  var file = e.parameter.file;
-  if (!branch || !file) {
-    return ContentService.createTextOutput('bad request: need branch & file').setMimeType(ContentService.MimeType.TEXT);
+  var blob;
+  if (e.parameter.fileId) {
+    // ดึงไฟล์ตรงด้วย Drive file id — ใช้กับไฟล์ที่ไม่ได้อยู่ใต้ AutoExport/{branch}
+    // (เช่น report_scores.csv ของ Finny) ไม่ผูกกับโครงสร้างโฟลเดอร์สาขา
+    blob = DriveApp.getFileById(e.parameter.fileId).getBlob();
+  } else {
+    var branch = e.parameter.branch;
+    var file = e.parameter.file;
+    if (!branch || !file) {
+      return ContentService.createTextOutput('bad request: need branch & file (or fileId)').setMimeType(ContentService.MimeType.TEXT);
+    }
+    blob = getFileBlob_(branch, file);
   }
-
-  var blob = getFileBlob_(branch, file);
   var bytes = blob.getBytes();
   var size = bytes.length;
 
