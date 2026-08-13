@@ -249,6 +249,144 @@ def push_stock(cfg, branch, src, now_iso, dry):
     json.dump({"fp": fp}, open(sf, "w", encoding="utf-8"))
     log("STOCK: pushed %d rows OK" % len(rows))
 
+# ---------- v3: จัดซื้อ (PO) — Phase 1b ของ SOPO Pipeline Kanban ----------
+def push_po(cfg, branch, src, now_iso, cutoff, dry):
+    if not _file_exists(os.path.join(src, "POPR.DBF")):
+        log("PO: no POPR.DBF found in %s -> skip" % src)
+        return
+
+    names = {}
+    for r in read_dbf(os.path.join(src, "APMAS.DBF"), fields={"SUPCOD", "PRENAM", "SUPNAM"}):
+        names[r.get("SUPCOD", "")] = (r.get("PRENAM", "") + " " + r.get("SUPNAM", "")).strip()
+
+    heads = {}
+    for r in read_dbf(os.path.join(src, "POPR.DBF"),
+                      fields={"PONUM", "PODAT", "SUPCOD", "NETAMT", "DOCSTAT", "CMPLDAT", "YOUREF"}):
+        pod = r.get("PODAT")
+        if not pod or pod < cutoff:
+            continue
+        po = (r.get("PONUM") or "").strip()
+        if not po:
+            continue
+        sup = (r.get("SUPCOD") or "").strip()
+        heads[po] = {
+            "branch": branch, "ponum": po,
+            "podat": d2s(pod), "supcod": sup, "supnam": names.get(sup, sup) or sup,
+            "netamt": round(float(r.get("NETAMT") or 0), 2),
+            "docstat": (r.get("DOCSTAT") or "").strip(),
+            "cmpldat": d2s(r.get("CMPLDAT")),
+            "youref": (r.get("YOUREF") or "").strip(),
+        }
+
+    items = {}
+    for r in read_dbf(os.path.join(src, "POPRIT.DBF"),
+                      fields={"PONUM", "SEQNUM", "STKCOD", "STKDES", "ORDQTY", "REMQTY", "TQUCOD"}):
+        po = (r.get("PONUM") or "").strip()
+        if po not in heads:
+            continue
+        items.setdefault(po, []).append({
+            "branch": branch, "ponum": po, "seq": int(r.get("SEQNUM") or 0),
+            "stkcod": (r.get("STKCOD") or "").strip(),
+            "stkdes": (r.get("STKDES") or "").strip(),
+            "ordqty": round(float(r.get("ORDQTY") or 0), 2),
+            "remqty": round(float(r.get("REMQTY") or 0), 2),
+            "unit": (r.get("TQUCOD") or "").strip(),
+        })
+
+    state_file = os.path.join(state_dir(), "state_po_%s.json" % branch)
+    try:
+        state = json.load(open(state_file, encoding="utf-8"))
+    except (OSError, ValueError):
+        state = {}
+    changed = []
+    for po, h in heads.items():
+        fp = hashlib.md5(json.dumps([h, items.get(po, [])],
+                                    ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+        if state.get(po) != fp:
+            changed.append((po, fp))
+    log("PO: %d PO in window, %d changed%s" %
+        (len(heads), len(changed), " (DRY)" if dry else ""))
+
+    if not changed or dry:
+        return
+
+    for batch in chunks([dict(heads[po], synced_at=now_iso) for po, _ in changed], 200):
+        sb_request(cfg, "POST", "/rest/v1/po_live?on_conflict=branch,ponum",
+                   batch, prefer="resolution=merge-duplicates,return=minimal")
+
+    for batch in chunks([po for po, _ in changed], 40):
+        polist = ",".join('"%s"' % p for p in batch)
+        sb_request(cfg, "DELETE",
+                   "/rest/v1/po_item_live?branch=eq.%s&ponum=in.(%s)" % (branch, polist))
+    all_items = [it for po, _ in changed for it in items.get(po, [])]
+    for batch in chunks([dict(it, synced_at=now_iso) for it in all_items], 500):
+        sb_request(cfg, "POST", "/rest/v1/po_item_live?on_conflict=branch,ponum,seq",
+                   batch, prefer="resolution=merge-duplicates,return=minimal")
+
+    for po, fp in changed:
+        state[po] = fp
+    state = {po: fp for po, fp in state.items() if po in heads or len(state) < 5000}
+    json.dump(state, open(state_file, "w", encoding="utf-8"))
+    log("PO: pushed %d PO (%d item rows) OK" % (len(changed), len(all_items)))
+
+# ---------- v3: สถานะจ่ายเงิน PO (AP) — เติมให้การ์ด PO เห็นสถานะจ่าย/ค้างจ่าย ----------
+def push_ap(cfg, branch, src, now_iso, cutoff, dry):
+    if not _file_exists(os.path.join(src, "APTRN.DBF")):
+        log("AP: no APTRN.DBF found in %s -> skip" % src)
+        return
+
+    rows = {}
+    for r in read_dbf(os.path.join(src, "APTRN.DBF"),
+                      fields={"DOCNUM", "DOCDAT", "PONUM", "SUPCOD", "BILNUM", "RECTYP",
+                              "NETAMT", "PAYAMT", "REMAMT", "DOCSTAT", "CMPLDAT", "DUEDAT"}):
+        po = (r.get("PONUM") or "").strip()
+        if not po:
+            continue
+        dat = r.get("DOCDAT")
+        if not dat or dat < cutoff:
+            continue
+        doc = (r.get("DOCNUM") or "").strip()
+        if not doc:
+            continue
+        rows[doc] = {
+            "branch": branch, "docnum": doc, "ponum": po,
+            "docdat": d2s(dat), "supcod": (r.get("SUPCOD") or "").strip(),
+            "bilnum": (r.get("BILNUM") or "").strip(),
+            "rectyp": (r.get("RECTYP") or "").strip(),
+            "netamt": round(float(r.get("NETAMT") or 0), 2),
+            "payamt": round(float(r.get("PAYAMT") or 0), 2),
+            "remamt": round(float(r.get("REMAMT") or 0), 2),
+            "docstat": (r.get("DOCSTAT") or "").strip(),
+            "cmpldat": d2s(r.get("CMPLDAT")),
+            "duedat": d2s(r.get("DUEDAT")),
+        }
+
+    state_file = os.path.join(state_dir(), "state_ap_%s.json" % branch)
+    try:
+        state = json.load(open(state_file, encoding="utf-8"))
+    except (OSError, ValueError):
+        state = {}
+    changed = []
+    for doc, h in rows.items():
+        fp = hashlib.md5(json.dumps(h, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+        if state.get(doc) != fp:
+            changed.append((doc, fp))
+    log("AP: %d AP txn in window, %d changed%s" %
+        (len(rows), len(changed), " (DRY)" if dry else ""))
+
+    if not changed or dry:
+        return
+
+    for batch in chunks([dict(rows[doc], synced_at=now_iso) for doc, _ in changed], 200):
+        sb_request(cfg, "POST", "/rest/v1/ap_live?on_conflict=branch,docnum",
+                   batch, prefer="resolution=merge-duplicates,return=minimal")
+
+    for doc, fp in changed:
+        state[doc] = fp
+    state = {doc: fp for doc, fp in state.items() if doc in rows or len(state) < 5000}
+    json.dump(state, open(state_file, "w", encoding="utf-8"))
+    log("AP: pushed %d txn OK" % len(changed))
+
 # ---------- main ----------
 def main():
     if len(sys.argv) < 2:
@@ -280,6 +418,16 @@ def main():
             push_stock(cfg, branch, src, now_iso, dry)
         except Exception as e:
             log("STOCK: error %s" % e)
+
+        # ---- v3: จัดซื้อ (PO) + สถานะจ่ายเงิน (AP) — พังได้โดยไม่กระทบ SO push ----
+        try:
+            push_po(cfg, branch, src, now_iso, cutoff, dry)
+        except Exception as e:
+            log("PO: error %s" % e)
+        try:
+            push_ap(cfg, branch, src, now_iso, cutoff, dry)
+        except Exception as e:
+            log("AP: error %s" % e)
 
         # ---- อ่านชื่อลูกค้า ----
         names = {}
