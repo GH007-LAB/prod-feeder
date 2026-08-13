@@ -20,6 +20,7 @@ for b in SKN BK PPS; do
   fi
   /usr/bin/python3 "$DIR/so_push.py" "$cf" >> "$LOG" 2>&1
   /usr/bin/python3 "$DIR/sopo_month.py" "$cf" >> "$LOG" 2>&1
+  /usr/bin/python3 "$DIR/dead_stock.py" "$cf" >> "$LOG" 2>&1
 done
 # Finny (report_scores.csv) — ไฟล์เดียวใช้ร่วมทุกสาขา รันครั้งเดียวต่อรอบ (ใช้ cfg ล่าสุดจาก loop บน)
 /usr/bin/python3 "$DIR/finny_sync.py" "$cf" >> "$LOG" 2>&1
