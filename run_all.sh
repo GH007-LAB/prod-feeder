@@ -26,6 +26,10 @@ for b in SKN BK PPS; do
   # เพราะ express_bill เขียนได้เฉพาะ service role (ดู quote_schema.sql)
   SUPABASE_SERVICE_KEY="$SUPABASE_SERVICE_KEY" EXPRESS_EVERY_MIN="$EXPRESS_EVERY_MIN" \
     /usr/bin/python3 "$DIR/express_sync.py" "$cf" >> "$LOG" 2>&1
+  # ตรวจว่าตัวเลขใน Supabase ตรงกับ DBF จริงไหม (ชั่วโมงละครั้งเหมือนกัน)
+  # ไม่ผ่านเมื่อไหร่ขึ้นบรรทัด VERIFY-FAIL: grep 'VERIFY-FAIL' ~/007so_push/feeder.log
+  SUPABASE_SERVICE_KEY="$SUPABASE_SERVICE_KEY" VERIFY_EVERY_MIN="$VERIFY_EVERY_MIN" \
+    /usr/bin/python3 "$DIR/verify.py" "$cf" >> "$LOG" 2>&1
 done
 # Finny (report_scores.csv) — ไฟล์เดียวใช้ร่วมทุกสาขา รันครั้งเดียวต่อรอบ (ใช้ cfg ล่าสุดจาก loop บน)
 /usr/bin/python3 "$DIR/finny_sync.py" "$cf" >> "$LOG" 2>&1
