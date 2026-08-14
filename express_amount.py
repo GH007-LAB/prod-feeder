@@ -72,12 +72,14 @@ def main():
         src = bcfg.get("SRC", "")
         n = 0
         for r in S.read_dbf(os.path.join(src, "ARTRN.DBF"),
-                            fields={"RECTYP", "DOCNUM", "NETAMT"}):
+                            fields={"RECTYP", "DOCNUM", "NETAMT", "ADVAMT"}):
             if (r.get("RECTYP") or "").strip() not in SALE_RECTYP:
                 continue
             k = (br, (r.get("DOCNUM") or "").strip())
             if k in want:
-                real[k] = float(r.get("NETAMT") or 0)
+                # NETAMT+ADVAMT = ยอดเต็มบนใบกำกับ ต้องตรงกับ express_sync.py
+                # ไม่งั้นรันไฟล์นี้ทีไรจะดึงยอดของบิลที่มีมัดจำกลับไปต่ำกว่าจริงทุกที
+                real[k] = float(r.get("NETAMT") or 0) + float(r.get("ADVAMT") or 0)
                 n += 1
         S.log("EXPRESS_AMT: %s เจอยอดจริง %d ใบ" % (br, n))
 

@@ -114,6 +114,7 @@ def main():
     for r in S.read_dbf(os.path.join(src, "ARMAS.DBF"), fields={"CUSCOD", "PRENAM", "CUSNAM"}):
         names[r.get("CUSCOD", "")] = (r.get("PRENAM", "") + " " + r.get("CUSNAM", "")).strip()
 
+    store_docs = {}  # DOCNUM ของบิลหน้าร้าน -> month (ไม่รวมออนไลน์/ระหว่างสาขา)
     person_m = {}  # (slmcod, month) -> dict
     def pm(sc, mk):
         return person_m.setdefault((sc, mk), {
@@ -163,6 +164,8 @@ def main():
                     b["online_tot"] += v
                 else:
                     b["sales_tot"] += v
+                    # จำเลขเอกสารหน้าร้านไว้ ใช้จำกัด scope ของ GP ให้ตรงกับยอดขาย
+                    store_docs[(r.get("DOCNUM") or "").strip()] = mk
                     if sc:
                         p = pm(sc, mk)
                         p["net_sales"] += v
@@ -181,18 +184,16 @@ def main():
 
     # GP% จริง — STCRD.DBF (stock ledger): XUNITPR = ต้นทุนต่อหน่วย ณ เวลาขาย
     # (ยืนยันจากข้อมูลจริงแล้ว — LOTVAL/LUNITPR ที่คิดว่าจะใช้ได้ กลับเป็น 0 เสมอ ไม่ได้ใช้จริง)
-    # เฉพาะแถวที่ DOCNUM ขึ้นต้น IV/HS (ตรงกับนิยาม "ขายจริง" เดียวกับ ARTRN RECTYP 1/3)
+    # นับเฉพาะบิลที่อยู่ใน store_docs = บิลหน้าร้านชุดเดียวกับที่นับเป็น sales_tot
+    # (เดิมกรองแค่ DOCNUM ขึ้นต้น IV/HS จึงรวมบิลออนไลน์กับบิลระหว่างสาขาเข้ามาด้วย
+    #  กลายเป็นเอากำไรจากบิลชุดหนึ่งไปหารกับยอดขายอีกชุด GP% เลยเพี้ยน — legacy กำกับไว้ใน
+    #  _sbc_gp ว่า "ตัด online O + interbranch C/J — scope เดียวกับ salesTot")
     # และ XUNITPR>0 เท่านั้น (สินค้าบางตัวไม่มีต้นทุนแยก เช่น อุปกรณ์เสริมที่รวมในแผ่นหลัก — ข้ามทั้ง 2 ฝั่ง กันดันมาร์จิ้นเพี้ยน)
+    # month มาจาก store_docs ไม่ใช่ DOCDAT ของ STCRD — กัน GP ไปตกคนละเดือนกับยอดขายบิลเดียวกัน
     for r in S.read_dbf(os.path.join(src, "STCRD.DBF"),
-                        fields={"DOCNUM", "DOCDAT", "SLMCOD", "TRNQTY", "UNITPR", "TRNVAL", "XUNITPR"}):
-        doc = (r.get("DOCNUM") or "").strip()
-        if not (doc.startswith("IV") or doc.startswith("HS")):
-            continue
-        dat = r.get("DOCDAT")
-        if not dat or dat < cutoff:
-            continue
-        mk = month_key(dat)
-        if mk not in keep_months:
+                        fields={"DOCNUM", "SLMCOD", "TRNQTY", "UNITPR", "TRNVAL", "XUNITPR"}):
+        mk = store_docs.get((r.get("DOCNUM") or "").strip())
+        if mk is None:
             continue
         xunitpr = float(r.get("XUNITPR") or 0)
         if xunitpr <= 0:

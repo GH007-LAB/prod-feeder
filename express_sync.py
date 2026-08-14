@@ -16,8 +16,9 @@ express_amount.py ใช้เติมยอด (ARTRN = ตัวจริง�
     เลขเดียวกันมีได้หลายสาขา (ต้องมี unique index branch,iv ตาม quote_amount_fix.sql)
   · cust = ARMAS.CUSNAM แปลง NBSP (\\xa0) เป็นช่องว่างปกติ — ตรงกับค่าที่ import เดิม
     เขียนไว้เป๊ะทั้ง 242 ใบที่จับคู่ได้ ⇒ รันแล้วไม่เกิด update ลอย ๆ
-  · amount = NETAMT + amount_source='express' (เหตุผลว่าทำไมไม่คำนวณเอง ดู
-    quote_amount_fix.sql §1) — สคริปต์นี้ทำงานของ express_amount.py ในตัวแล้ว
+  · amount = NETAMT+ADVAMT (ยอดเต็มบนใบกำกับ) + amount_source='express'
+    (เหตุผลว่าทำไมไม่คำนวณยอดเอง ดู quote_amount_fix.sql §1) — สคริปต์นี้ทำงาน
+    ของ express_amount.py ในตัวแล้ว
   · ไม่ส่งคอลัมน์ payload/amount_calc ไปด้วย → แถวเก่าที่ import มาจาก ivdata
     เก็บ payload ดิบไว้เหมือนเดิม (PostgREST update เฉพาะคอลัมน์ที่ส่งไป)
 
@@ -112,7 +113,7 @@ def main():
     rows, cancelled = {}, []
     for r in S.read_dbf(os.path.join(src, "ARTRN.DBF"),
                         fields={"RECTYP", "DOCNUM", "DOCDAT", "SONUM", "CUSCOD",
-                                "NETAMT", "DOCSTAT"}):
+                                "NETAMT", "ADVAMT", "DOCSTAT"}):
         if (r.get("RECTYP") or "").strip() not in SALE_RECTYP:
             continue
         doc = (r.get("DOCNUM") or "").strip()
@@ -131,7 +132,10 @@ def main():
             "so": (r.get("SONUM") or "").strip() or None,
             "cust": names.get(cus) or cus or None,
             "bill_date": S.d2s(dat),
-            "amount": round(float(r.get("NETAMT") or 0), 2),
+            # ยอดเต็มบนใบกำกับ = NETAMT + ADVAMT — บิลที่ลูกค้าวางมัดจำไว้ก่อน Express จะหัก
+            # มัดจำออกจาก NETAMT แล้ว เก็บแต่ NETAMT พนักงานจะค้นเจอยอดไม่ตรงกระดาษ
+            # (1,102 ใบจาก 29,724 = 20.2M) นิยามเดียวกับที่ SOPO ใช้ทั้งระบบ
+            "amount": round(float(r.get("NETAMT") or 0) + float(r.get("ADVAMT") or 0), 2),
             "amount_source": "express",
         }
 
