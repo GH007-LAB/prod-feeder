@@ -33,4 +33,8 @@ for b in SKN BK PPS; do
 done
 # Finny (report_scores.csv) — ไฟล์เดียวใช้ร่วมทุกสาขา รันครั้งเดียวต่อรอบ (ใช้ cfg ล่าสุดจาก loop บน)
 /usr/bin/python3 "$DIR/finny_sync.py" "$cf" >> "$LOG" 2>&1
+# action log จากจอ SOPO เดิม (Apps Script) -> sopo_action — ไฟล์เดียวรวมทุกสาขา
+# รันครั้งเดียวต่อรอบ ตัวสคริปต์คุมจังหวะเองชั่วโมงละครั้ง (ALOG_EVERY_MIN)
+SUPABASE_SERVICE_KEY="$SUPABASE_SERVICE_KEY" ALOG_URL="$ALOG_URL" ALOG_EVERY_MIN="$ALOG_EVERY_MIN" \
+  /usr/bin/python3 "$DIR/alog_sync.py" "$cf" >> "$LOG" 2>&1
 echo "$(date '+%Y-%m-%d %H:%M:%S') DONE" >> "$LOG"
