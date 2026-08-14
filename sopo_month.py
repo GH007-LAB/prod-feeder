@@ -16,10 +16,17 @@ import sys, os, json, datetime, urllib.request, urllib.error, urllib.parse, re
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import so_push as S  # reuse PROXY / read_dbf / sb_request / load_config / state_dir / chunks / log
 
-MONTHS_BACK = 6  # กี่เดือนย้อนหลังที่คำนวณ/เขียนทับทุกรอบ (พอสำหรับดู trend ไม่โหลดของเก่าทั้งหมด)
+# 20 เดือน = ครอบคลุม ม.ค. ของปีนี้เสมอ (แม้รันเดือน ธ.ค.) + ทั้งปีที่แล้วไว้เทียบ
+# เดิมตั้ง 6 ซึ่งทำให้ยอดสะสมทั้งปีของ Bonus Race ขาด ม.ค.-ก.พ. ไปเฉย ๆ (หาย 34.6M)
+MONTHS_BACK = 20
 
-IB_RE = re.compile(r"007\s*Metals|เจบี|เจ\.บี\.", re.I)
-ON_RE = re.compile(r"TIKTOK|SHOPEE|LAZADA|NOCNOC", re.I)
+# ---- กติกาแยกประเภทลูกค้า: ยกมาจาก build_all.py ของ SOPO เดิมให้ตรงกันทุกตัวอักษร ----
+# ระหว่างสาขา = รหัสลูกค้าเมื่อตัดตัวอักษรนำหน้าออกแล้วขึ้นต้นด้วยเลขชุดนี้ (เลขผู้เสียภาษีของสาขาเอง)
+# ตรวจแล้วว่าให้ผลตรงกับ legacy: ยอดหน้าร้านปี 2025 = 138,559,956 ตรงหมุด "138M แซงทั้งปี 2025"
+_IBNUM = ("042090090", "042471", "042491", "042492", "061031")
+# ออนไลน์ = รหัสขึ้นต้น O (จับได้ 100% ของยอดออนไลน์ปี 2026 ตรวจแล้ว)
+# ชื่อ platform เป็น fallback สำหรับข้อมูลเก่าที่ยังไม่มีรหัส — ตามที่ legacy ทำไว้
+PLATFORMS = ("SHOPEE", "TIKTOK", "LAZADA", "SHOPEEPAY", "NOCNOC")
 
 
 def month_key(d):
@@ -39,11 +46,12 @@ def months_window(today, n):
 
 
 def segment(cuscod, name):
-    if (cuscod or "").strip().upper().startswith("J"):
+    c = (cuscod or "").strip()
+    if re.sub(r"^[^0-9]+", "", c).startswith(_IBNUM):
         return "interbranch"
-    if IB_RE.search(name or ""):
-        return "interbranch"
-    if ON_RE.search(name or ""):
+    if c[:1].upper() == "O":
+        return "online"
+    if any(p in (name or "").upper() for p in PLATFORMS):
         return "online"
     return "regular"
 
@@ -77,6 +85,7 @@ def main():
     so_by_num = {r["sonum"]: r for r in so_rows if r.get("sonum")}
 
     branch_m = {}  # month -> dict
+    day_m = {}     # month -> {"วันที่": ยอดหน้าร้าน+ออนไลน์ของวันนั้น}
     def bm(mk):
         return branch_m.setdefault(mk, {
             "sales_tot": 0.0, "online_tot": 0.0, "interbranch_tot": 0.0,
@@ -113,7 +122,8 @@ def main():
         })
 
     for r in S.read_dbf(os.path.join(src, "ARTRN.DBF"),
-                        fields={"RECTYP", "DOCNUM", "DOCDAT", "SONUM", "SLMCOD", "CUSCOD", "NETAMT"}):
+                        fields={"RECTYP", "DOCNUM", "DOCDAT", "SONUM", "SLMCOD", "CUSCOD",
+                                "NETAMT", "ADVAMT"}):
         dat = r.get("DOCDAT")
         if not dat or dat < cutoff:
             continue
@@ -134,20 +144,32 @@ def main():
             if sc:
                 pm(sc, mk)["return_value"] += v
         elif rectyp in ("1", "3"):  # HS ขายเงินสด / IV ใบกำกับ = ยอดขายจริง
+            # ยอดเต็มของบิล = NETAMT + ADVAMT — ถ้าลูกค้าวางมัดจำไว้ก่อน Express จะหักมัดจำ
+            # ออกจาก NETAMT แล้ว นับแต่ NETAMT จึงได้ยอดขายต่ำกว่าจริง (1,102 บิล = 20.2M)
+            # legacy build_all.py ใช้ NETAMT+ADVAMT มาตลอด ("NETAMT+ADVAMT=ยอดเต็ม")
+            v += float(r.get("ADVAMT") or 0)
             seg = segment(cc, names.get(cc, ""))
-            if seg == "online":
-                b["online_tot"] += v
+            if seg == "interbranch":
+                # ขายระหว่างสาขาไม่ใช่ยอดขาย — legacy แยกเป็น IVIB ไม่รวมยอดหน้าร้าน
+                # (เดิมบวกเข้า sales_tot ทำให้ยอดทุกหน้าจอเกินจริงปีละหลายสิบล้าน)
+                b["interbranch_tot"] += v
             else:
-                b["sales_tot"] += v
-                if seg == "interbranch":
-                    b["interbranch_tot"] += v
-                if sc:
-                    p = pm(sc, mk)
-                    p["net_sales"] += v
-                    p["bill_count"] += 1
-                    if v >= 100000:
-                        p["big_deal_value"] += v
-                        p["big_deal_count"] += 1
+                # ยอดรายวัน (หน้าร้าน+ออนไลน์) = ตัวเดียวกับ _tot[b][0]+_tot[b][1] ของ legacy
+                # ใช้ทำการ์ด "วันนี้ทำได้" + หาเพซจากวันล่าสุดที่มีบิลจริง
+                dk = str(dat.day)
+                dm = day_m.setdefault(mk, {})
+                dm[dk] = round(dm.get(dk, 0.0) + v, 2)
+                if seg == "online":
+                    b["online_tot"] += v
+                else:
+                    b["sales_tot"] += v
+                    if sc:
+                        p = pm(sc, mk)
+                        p["net_sales"] += v
+                        p["bill_count"] += 1
+                        if v >= 100000:
+                            p["big_deal_value"] += v
+                            p["big_deal_count"] += 1
             # cycle time: SO->IV/HS (ใช้ทุก segment รวมออนไลน์/ระหว่างสาขาด้วย เหมือน legacy)
             sn = (r.get("SONUM") or "").strip()
             so = so_by_num.get(sn)
@@ -198,7 +220,8 @@ def main():
             pm(sc, mk)["so_value"] += float(r.get("NETAMT") or 0)
 
     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
-    branch_batch = [dict(v, branch=branch, month=mk, synced_at=now_iso) for mk, v in branch_m.items()]
+    branch_batch = [dict(v, branch=branch, month=mk, synced_at=now_iso, day_tot=day_m.get(mk, {}))
+                    for mk, v in branch_m.items()]
     person_batch = [dict(v, branch=branch, slmcod=sc, month=mk, synced_at=now_iso) for (sc, mk), v in person_m.items()]
 
     S.log("SOPO: %d branch-month rows, %d person-month rows%s" %
@@ -207,8 +230,18 @@ def main():
         return
 
     for batch in S.chunks(branch_batch, 100):
-        S.sb_request(cfg, "POST", "/rest/v1/sopo_branch_month?on_conflict=branch,month",
-                     batch, prefer="resolution=merge-duplicates,return=minimal")
+        try:
+            S.sb_request(cfg, "POST", "/rest/v1/sopo_branch_month?on_conflict=branch,month",
+                         batch, prefer="resolution=merge-duplicates,return=minimal")
+        except RuntimeError as e:
+            # ยังไม่ได้รัน sopo-app/sql/sopo_branch_month_day_tot.sql -> ยังไม่มีคอลัมน์ day_tot
+            # ส่งใหม่แบบไม่มียอดรายวัน ดีกว่าปล่อยให้ทั้งรอบล้ม (การ์ด "วันนี้ทำได้" จะยังว่างไว้ก่อน)
+            if "day_tot" not in str(e):
+                raise
+            S.log("SOPO: ไม่มีคอลัมน์ day_tot -> push แบบไม่มียอดรายวัน (รัน sql/sopo_branch_month_day_tot.sql ก่อน)")
+            S.sb_request(cfg, "POST", "/rest/v1/sopo_branch_month?on_conflict=branch,month",
+                         [{k: x for k, x in row.items() if k != "day_tot"} for row in batch],
+                         prefer="resolution=merge-duplicates,return=minimal")
     for batch in S.chunks(person_batch, 200):
         S.sb_request(cfg, "POST", "/rest/v1/sopo_person_month?on_conflict=branch,slmcod,month",
                      batch, prefer="resolution=merge-duplicates,return=minimal")
