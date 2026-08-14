@@ -260,6 +260,15 @@ def main():
                                      toks[i + 1] if i + 1 < len(toks) else "?")
         return None
 
+    # สะสมไว้ทำ ANNOUNCE ของ Monday Brief (sopo-app/sql/sopo_announce.sql):
+    #   risk: ยอดขาย 30 วันล่าสุดต่อ SKU -> เทียบสต็อกคงเหลือ = สัปดาห์ที่ของพอขาย
+    #   rrp:  ราคาสั่งซื้อ (บรรทัด PO — แหล่งเดียวกับ legacy price[]) ต่อ SKU ต่อเดือน
+    #         เทียบเดือนล่าสุดกับเดือนก่อน = ราคาขยับ (RR รับเข้าเบาบางเกิน บางเดือนไม่พอเทียบ)
+    today30 = today - datetime.timedelta(days=30)
+    risk = {}     # stkcod -> [qty30, val30, ชื่อ]
+    rrp = {}      # (month, stkcod) -> [qty, amt]
+    rr_name = {}
+
     # STCRD (stock ledger) รอบเดียว ใช้ 4 งาน — บรรทัดสินค้าของทุกเอกสารอยู่ที่นี่:
     #   IV/HS หน้าร้าน -> GP (scope เดียวกับ sales_tot ตาม _sbc_gp ของ legacy)
     #   IV/HS หน้าร้าน+ออนไลน์ -> ลิสต์ขายดีคอยล์ (legacy DET รวมออนไลน์)
@@ -314,6 +323,13 @@ def main():
         mk, dat, is_store = hit
 
         stk = (r.get("STKCOD") or "").strip().upper()
+        # อัตราขาย 30 วันล่าสุด (ทุกช่องทางที่ดึงสต็อกจริง) — ไม่รวมคอยล์วัตถุดิบ ZZ
+        if dat >= today30 and stk and not stk.startswith("ZZ"):
+            a = risk.setdefault(stk, [0.0, 0.0, ""])
+            a[0] += float(r.get("TRNQTY") or 0)
+            a[1] += trnval
+            if not a[2]:
+                a[2] = (r.get("STKDES") or "").strip()
         if stk.startswith("01"):
             lab = coil_label(r.get("STKDES"))
             if lab:
@@ -342,6 +358,28 @@ def main():
                 p["gp_value"] += gpv
                 p["gp_base"] += trnval
 
+    # ---- สินค้าเสี่ยงขาด: คงเหลือ (STMAS) ÷ อัตราขาย/สัปดาห์ = สัปดาห์ที่ของพอ ----
+    # เกณฑ์ธงตาม build_buy.py:64 (🔴 <2 · 🟡 <4) เก็บเฉพาะ <12 สัปดาห์ (actionable)
+    onhand = {}
+    for r in S.read_dbf(os.path.join(src, "STMAS.DBF"), fields={"STKCOD", "TOTBAL", "STKDES"}):
+        onhand[(r.get("STKCOD") or "").strip().upper()] = (
+            float(r.get("TOTBAL") or 0), (r.get("STKDES") or "").strip())
+    risk_rows = []
+    for stk, (q30, v30, nm) in risk.items():
+        if q30 <= 0:
+            continue
+        oh, nm2 = onhand.get(stk, (0.0, ""))
+        spw = q30 / 30.0 * 7.0
+        wv = round(oh / spw, 1) if spw > 0 and oh >= 0 else None
+        if wv is None or wv >= 12:
+            continue
+        risk_rows.append({
+            "branch": branch, "stkcod": stk, "stkdes": nm or nm2,
+            "onhand": round(oh, 2), "sale30_qty": round(q30, 2), "sale30_val": round(v30, 2),
+            "weeks_cover": wv,
+            "flag": "🔴 เสี่ยงขาด" if wv < 2 else ("🟡 ใกล้หมด" if wv < 4 else "🟢 พอ"),
+        })
+
     # ---- %รับของ PO (ful ของจอเดิม): บรรทัด PO ที่รับครบแล้ว / บรรทัดทั้งหมดของเดือน ----
     # นับที่ระดับบรรทัด (POPRIT) ตาม POdone/POcnt ของ build_buy — REMQTY<=0 = รับครบ
     # ค่าเป็น "สถานะปัจจุบัน" ของ PO ที่ออกเดือนนั้น (รับของทีหลังตัวเลขเดือนเก่าขยับขึ้นได้
@@ -355,7 +393,8 @@ def main():
             pmk = month_key(pod)
             if pmk in keep_months:
                 po_mk[(r.get("PONUM") or "").strip()] = (pmk, pod)
-        for r in S.read_dbf(os.path.join(src, "POPRIT.DBF"), fields={"PONUM", "REMQTY"}):
+        for r in S.read_dbf(os.path.join(src, "POPRIT.DBF"),
+                            fields={"PONUM", "REMQTY", "STKCOD", "STKDES", "ORDQTY", "TRNVAL"}):
             hit = po_mk.get((r.get("PONUM") or "").strip())
             if hit is None:
                 continue
@@ -364,6 +403,31 @@ def main():
             for b in (bm(pmk), bd(pod)):
                 b["po_line_total"] += 1
                 b["po_line_done"] += done
+            # ราคาสั่งซื้อต่อ SKU ต่อเดือน (legacy price[]: qty=คอลัมน์จำนวน, amt=มูลค่าบรรทัด)
+            stk = (r.get("STKCOD") or "").strip().upper()
+            if stk:
+                a = rrp.setdefault((pmk, stk), [0.0, 0.0])
+                a[0] += float(r.get("ORDQTY") or 0)
+                a[1] += float(r.get("TRNVAL") or 0)
+                if stk not in rr_name:
+                    rr_name[stk] = (r.get("STKDES") or "").strip()
+
+    # ---- ราคาซื้อขยับ: เดือนล่าสุดที่มีสั่งซื้อ vs เดือนก่อนหน้า (top 250 ตามมูลค่า — legacy) ----
+    price_rows = []
+    pm_keys = sorted({k[0] for k in rrp})
+    if pm_keys:
+        curM = pm_keys[-1]
+        prevM = pm_keys[-2] if len(pm_keys) >= 2 else curM
+        cur_amt = {s: v[1] for (m2, s), v in rrp.items() if m2 == curM}
+        for s in sorted(cur_amt, key=lambda k: -cur_amt[k])[:250]:
+            cq, ca = rrp.get((curM, s), [0.0, 0.0])
+            pq, pa = rrp.get((prevM, s), [0.0, 0.0])
+            price_rows.append({
+                "branch": branch, "stkcod": s, "stkdes": rr_name.get(s, ""),
+                "prev_month": prevM, "cur_month": curM,
+                "prev_qty": round(pq, 2), "prev_amt": round(pa, 2),
+                "cur_qty": round(cq, 2), "cur_amt": round(ca, 2),
+            })
 
     # so_value ต่อเซลล์ (lead-axis proxy แบบง่าย = มูลค่า SO ที่ SLMCOD คนนั้นออกเดือนนี้)
     for r in S.read_dbf(os.path.join(src, "OESO.DBF"), fields={"SODAT", "SLMCOD", "NETAMT"}):
@@ -407,6 +471,22 @@ def main():
     for batch in S.chunks(person_batch, 200):
         S.sb_request(cfg, "POST", "/rest/v1/sopo_person_month?on_conflict=branch,slmcod,month",
                      batch, prefer="resolution=merge-duplicates,return=minimal")
+
+    # ---- ANNOUNCE (snapshot ปัจจุบัน): ลบของสาขาแล้วเขียนทับ — SKU ที่พ้นเงื่อนไขหายเอง ----
+    try:
+        S.sb_request(cfg, "DELETE", "/rest/v1/sopo_stock_risk?branch=eq.%s" % branch)
+        for batch in S.chunks([dict(x, synced_at=now_iso) for x in risk_rows], 200):
+            S.sb_request(cfg, "POST", "/rest/v1/sopo_stock_risk?on_conflict=branch,stkcod",
+                         batch, prefer="resolution=merge-duplicates,return=minimal")
+        S.sb_request(cfg, "DELETE", "/rest/v1/sopo_price_move?branch=eq.%s" % branch)
+        for batch in S.chunks([dict(x, synced_at=now_iso) for x in price_rows], 200):
+            S.sb_request(cfg, "POST", "/rest/v1/sopo_price_move?on_conflict=branch,stkcod",
+                         batch, prefer="resolution=merge-duplicates,return=minimal")
+        S.log("SOPO: announce %d เสี่ยงขาด + %d ราคาซื้อ" % (len(risk_rows), len(price_rows)))
+    except RuntimeError as e:
+        if "sopo_stock_risk" not in str(e) and "sopo_price_move" not in str(e):
+            raise
+        S.log("SOPO: ยังไม่มีตาราง announce -> ข้าม (รัน sopo-app/sql/sopo_announce.sql ก่อน)")
 
     # ---- รายวัน: sopo_branch_day / sopo_person_day ----
     # เดือนเก่าไม่ขยับแล้ว รอบปกติจึง push แค่เดือนนี้+เดือนก่อน (delete ช่วงแล้ว insert
