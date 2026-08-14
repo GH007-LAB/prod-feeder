@@ -21,6 +21,11 @@ for b in SKN BK PPS; do
   /usr/bin/python3 "$DIR/so_push.py" "$cf" >> "$LOG" 2>&1
   /usr/bin/python3 "$DIR/sopo_month.py" "$cf" >> "$LOG" 2>&1
   /usr/bin/python3 "$DIR/dead_stock.py" "$cf" >> "$LOG" 2>&1
+  # บิลขาย Express (ARTRN) -> express_bill ของ quote-app — ตัวสคริปต์คุมจังหวะเอง
+  # ชั่วโมงละครั้ง (EXPRESS_EVERY_MIN) ส่ง service_role key ทาง env ไม่เขียนลง cfg
+  # เพราะ express_bill เขียนได้เฉพาะ service role (ดู quote_schema.sql)
+  SUPABASE_SERVICE_KEY="$SUPABASE_SERVICE_KEY" EXPRESS_EVERY_MIN="$EXPRESS_EVERY_MIN" \
+    /usr/bin/python3 "$DIR/express_sync.py" "$cf" >> "$LOG" 2>&1
 done
 # Finny (report_scores.csv) — ไฟล์เดียวใช้ร่วมทุกสาขา รันครั้งเดียวต่อรอบ (ใช้ cfg ล่าสุดจาก loop บน)
 /usr/bin/python3 "$DIR/finny_sync.py" "$cf" >> "$LOG" 2>&1

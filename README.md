@@ -41,14 +41,40 @@ python3 so_push.py <(printf "BRANCH=SKN\nSRC=$DRIVE_ROOT/SKN\nSUPABASE_URL=$SUPA
 - รันมือ: `./run_all.sh`
 - ปิด: `./uninstall.sh`
 - ล้าง state (บังคับ push ใหม่หมด): `rm ~/007so_push/state_*.json ~/007so_push/stock_*.json`
+- บังคับ express_sync ให้รันรอบถัดไปทันที: `rm ~/007so_push/express_last_*.txt`
 
 ## ไฟล์
 | ไฟล์ | หน้าที่ |
 |---|---|
 | `so_push.py` | feeder จริง (SO+item+coil ในตัว, pure Python) |
+| `sopo_month.py` | สรุปรายเดือนต่อสาขา/ต่อเซลล์ → `sopo_branch_month` / `sopo_person_month` |
+| `dead_stock.py` | สินค้าค้างเกิน 90 วัน → `sopo_dead_stock` |
+| `finny_sync.py` | คะแนน Finny (`report_scores.csv`) → `finny_daily` |
+| `express_sync.py` | บิลขาย Express (`ARTRN.DBF`) → `express_bill` ของ quote-app (ชั่วโมงละครั้ง) |
+| `express_amount.py` | ของเก่า: เติมยอดจริงให้แถวที่ import มาจาก ivdata — `express_sync.py` ทำแทนแล้ว |
 | `feeder.env.example` | เทมเพลต — `cp` เป็น `feeder.env` แล้วแก้ต่อเครื่อง (ไม่ commit เพราะมี `PROXY_TOKEN`) |
 | `run_all.sh` | รันทั้ง 3 สาขา + log |
 | `install.sh` / `uninstall.sh` | ติดตั้ง/ปิด launchd |
+
+## `express_sync.py` — บิลเก่า Express ให้ quote-app ค้นได้
+
+ตาราง `express_bill` เดิมมาจาก import ครั้งเดียว (243 ใบ, 21–29 ก.ค. 69) บิลที่ออกหลังจากนั้น
+จึงค้นไม่เจอ — สคริปต์นี้ sync ต่อเนื่องจาก `ARTRN.DBF` (RECTYP 1=HS / 3=IV, ข้ามใบยกเลิก
+`DOCSTAT='C'`) key = `(branch, DOCNUM)` และเติม `amount` จาก `NETAMT` ให้ในตัว
+
+- ต้องมี `SUPABASE_SERVICE_KEY` ใน `feeder.env` — `express_bill` เขียนได้เฉพาะ service role
+  (`quote_schema.sql`) ถ้าไม่ใส่ สคริปต์จะข้ามเงียบ ๆ ไม่กระทบตัวอื่น
+- ดึงทั้งประวัติที่มีใน ARTRN (ไม่ใช้ `WINDOW_DAYS`) เพราะเป็นคลังบิลไว้ค้นย้อนหลัง —
+  รอบถัดไปเทียบ fingerprint ใน `state_express_<สาขา>.json` ก่อน ไม่มีอะไรเปลี่ยนก็ไม่ยิงเลย
+- `run_all.sh` เรียกทุกรอบ แต่ทำงานจริงชั่วโมงละครั้ง (`EXPRESS_EVERY_MIN`, default 60)
+  เพราะต้องโหลด ARTRN+ARMAS ทั้งไฟล์ ~35 วิ/สาขา — รันมือทันที: ใส่ `--now`
+- ไม่แตะคอลัมน์ `payload` / `amount_calc` → 243 แถวที่ import จาก ivdata เก็บ record ดิบไว้ครบ
+
+```bash
+source feeder.env
+SUPABASE_SERVICE_KEY="$SUPABASE_SERVICE_KEY" python3 express_sync.py ~/007so_push/cfg_BK.txt --now
+python3 express_sync.py ~/007so_push/cfg_BK.txt --dry            # ดูเฉย ๆ ไม่ต้องมี key
+```
 
 ## หมายเหตุ
 - ความสด ~15 นาที (ตามรอบ 007DBFSync) · งานด่วน = ปุ่ม ⚡ ในแอพ (พิมพ์เลข SO เข้าตรง)
