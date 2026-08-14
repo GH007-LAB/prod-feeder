@@ -99,6 +99,16 @@ def main():
                 if isinstance(info, dict):
                     smap[(b, c)] = info.get("name", c).split("(")[0].strip()
 
+    # FRAG: สินค้าชื่อเดียวกันหลายรหัส — จับจากบรรทัดขายจริงปีนี้ (กติกา build_all.py:700-709)
+    # key = clean(ชื่อ): ตัดเลข/จุด/ขีดนำหน้า (ขนาด/ความยาวที่ฝังในชื่อ) เหลือชื่อสินค้าแท้ [:40]
+    import re
+    def clean(d):
+        d = (d or "").replace("\xa0", " ")
+        return (re.sub(r"^[\d\.\s\-]+", "", d).strip()[:40]) or d[:40]
+    year_start = datetime.date(today.year, 1, 1)
+    frag_names = {}  # ชื่อ clean -> set(รหัส)
+    frag_br = {}     # รหัส -> set(สาขา)
+
     items = []
     for br in BRANCHES:
         cf = os.path.join(cfg_dir, "cfg_%s.txt" % br)
@@ -114,16 +124,37 @@ def main():
             names[r.get("CUSCOD", "")] = ((r.get("PRENAM", "") + " " + r.get("CUSNAM", ""))
                                           .replace("\xa0", " ").strip())
 
-        # IV/HS ที่อ้าง SO (ตัวปิดเควสต์ขาย)
-        iv_by_so, hs_by_so = set(), set()
+        # IV/HS ที่อ้าง SO (ตัวปิดเควสต์ขาย) + ชุดบิลขายปีนี้ (ไม่รวมระหว่างสาขา) ไว้จับ FRAG
+        iv_by_so, hs_by_so, sale_docs = set(), set(), set()
         for r in S.read_dbf(os.path.join(src, "ARTRN.DBF"),
-                            fields={"RECTYP", "SONUM", "DOCSTAT"}):
+                            fields={"RECTYP", "SONUM", "DOCSTAT", "DOCNUM", "DOCDAT", "CUSCOD"}):
             rt = (r.get("RECTYP") or "").strip()
             if rt not in ("1", "3") or (r.get("DOCSTAT") or "").strip() == "C":
                 continue
             sn = (r.get("SONUM") or "").strip()
             if sn:
                 (iv_by_so if rt == "3" else hs_by_so).add(sn)
+            dat = r.get("DOCDAT")
+            if dat and dat >= year_start:
+                cu = names.get((r.get("CUSCOD") or "").strip(), "")
+                if not (("007" in cu.upper().replace("\xa0", " ")) or ("เจบี" in cu) or ("เจ.บี" in cu)):
+                    sale_docs.add((r.get("DOCNUM") or "").strip())
+
+        # บรรทัดขาย -> จับกลุ่มชื่อซ้ำหลายรหัส (ตัด 07COMM/07COMI ตาม legacy)
+        for r in S.read_dbf(os.path.join(src, "STCRD.DBF"),
+                            fields={"DOCNUM", "STKCOD", "STKDES", "TRNVAL"}):
+            if (r.get("DOCNUM") or "").strip() not in sale_docs:
+                continue
+            stk = (r.get("STKCOD") or "").strip()
+            if not stk or float(r.get("TRNVAL") or 0) <= 0 or stk.upper().startswith(("07COMM", "07COMI")):
+                continue
+            des = (r.get("STKDES") or "").replace("\xa0", " ").strip()
+            # ชื่อขึ้นต้นด้วยตัวเลข = SKU เศษตัด/ชิ้นตามความยาว ("3.00 -2 ตรง ซิงค์...")
+            # ตัดเลขแล้วจะไปรวมกับตัวแม่กลายเป็นซ้ำปลอม — CSV ที่จอเดิมอ่านไม่มี prefix นี้
+            if not des or des[0].isdigit():
+                continue
+            frag_names.setdefault(clean(des), set()).add(stk)
+            frag_br.setdefault(stk, set()).add(br)
 
         so_all = {}
         for r in S.read_dbf(os.path.join(src, "OESO.DBF"),
@@ -240,6 +271,25 @@ def main():
     for batch in S.chunks([dict(x, snapshot_id=snap_id, payload={}, as_of=now_iso)
                            for x in items], 200):
         S.sb_request(cfg, "POST", "/rest/v1/sopo_item", batch, prefer="return=minimal")
+
+    # ---- FRAG -> sopo_frag (snapshot ปัจจุบัน: delete-เขียนทับ) ----
+    frag_rows = []
+    for nm0, codes in frag_names.items():
+        if len(codes) < 2:
+            continue
+        frag_rows.append({
+            "name": nm0,
+            "code_count": len(codes),
+            "codes": "/".join(sorted(codes))[:500],
+            "detail": " · ".join("%s (%s)" % (c, "/".join(sorted(frag_br.get(c, set()))))
+                                 for c in sorted(codes))[:800],
+            "synced_at": now_iso,
+        })
+    S.sb_request(cfg, "DELETE", "/rest/v1/sopo_frag?name=neq.__none__")
+    for batch in S.chunks(frag_rows, 200):
+        S.sb_request(cfg, "POST", "/rest/v1/sopo_frag?on_conflict=name",
+                     batch, prefer="resolution=merge-duplicates,return=minimal")
+    S.log("QUESTS: FRAG %d กลุ่มชื่อซ้ำหลายรหัส" % len(frag_rows))
 
     # เก็บ snapshot ล่าสุด KEEP_SNAPSHOTS ชุด (ตัวเก่าลบทิ้ง — sopo_item cascade ตาม)
     old = sb_json(cfg, "GET", "/rest/v1/sopo_snapshot?select=id&order=as_of.desc&offset=%d"
