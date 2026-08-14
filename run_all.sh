@@ -40,4 +40,8 @@ SUPABASE_SERVICE_KEY="$SUPABASE_SERVICE_KEY" ALOG_URL="$ALOG_URL" ALOG_EVERY_MIN
 # คะแนนพัฒนาการรายเดือน -> sopo_dev_month (HR Merit อ่านผ่าน view hr_dev_score)
 # อ่านจาก Supabase ล้วน เร็วมาก รันทุกรอบได้
 /usr/bin/python3 "$DIR/dev_score.py" "$cf" >> "$LOG" 2>&1
+# รายการงานให้กด ✔ (sopo_item) — สร้างจาก DBF ตรง แทน sync จากเครื่อง Windows สกลนคร
+# ชั่วโมงละครั้ง (QUESTS_EVERY_MIN) ต้องใช้ service key
+SUPABASE_SERVICE_KEY="$SUPABASE_SERVICE_KEY" QUESTS_EVERY_MIN="$QUESTS_EVERY_MIN" \
+  /usr/bin/python3 "$DIR/quests_sync.py" "$cf" >> "$LOG" 2>&1
 echo "$(date '+%Y-%m-%d %H:%M:%S') DONE" >> "$LOG"
