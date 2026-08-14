@@ -88,9 +88,12 @@ def main():
     so_by_num = {r["sonum"]: r for r in so_rows if r.get("sonum")}
 
     _B0 = {"sales_tot": 0.0, "online_tot": 0.0, "interbranch_tot": 0.0,
-           "ret_tot": 0.0, "ai_tot": 0.0, "ai_cnt": 0,
+           "ret_tot": 0.0, "comm_tot": 0.0, "plat_tot": 0.0, "buy_tot": 0.0,
+           "ai_tot": 0.0, "ai_cnt": 0, "bill_count": 0,
            "so_issued_value": 0.0, "open_value": 0.0, "open_count": 0,
-           "cycle_days_sum": 0.0, "cycle_days_n": 0}
+           "cycle_days_sum": 0.0, "cycle_days_n": 0, "cycle_le1_n": 0,
+           "cust_new": 0, "cust_repeat": 0, "cust_total": 0,
+           "gp_value": 0.0, "gp_base": 0.0}
     branch_m = {}  # month -> dict
     branch_d = {}  # date  -> dict (คอลัมน์ชุดเดียวกัน แค่ granularity = วัน)
     day_m = {}     # month -> {"วันที่": ยอดหน้าร้าน+ออนไลน์ของวันนั้น}
@@ -120,8 +123,12 @@ def main():
         names[r.get("CUSCOD", "")] = (r.get("PRENAM", "") + " " + r.get("CUSNAM", "")).strip()
 
     _P0 = {"net_sales": 0.0, "bill_count": 0, "big_deal_value": 0.0, "big_deal_count": 0,
-           "return_value": 0.0, "so_value": 0.0, "gp_value": 0.0, "gp_base": 0.0}
-    store_docs = {}  # DOCNUM ของบิลหน้าร้าน -> (month, date) — ไม่รวมออนไลน์/ระหว่างสาขา
+           "return_value": 0.0, "comm_value": 0.0, "comm_count": 0,
+           "so_value": 0.0, "gp_value": 0.0, "gp_base": 0.0}
+    # sale_docs: บิลขาย (หน้าร้าน+ออนไลน์ ไม่รวมระหว่างสาขา) -> (month, date, เป็นหน้าร้านไหม)
+    #   หน้าร้านใช้จำกัด scope GP · ทั้งสองใช้ทำลิสต์ขายดี (legacy DET รวมออนไลน์ด้วย)
+    # sr_docs: เอกสาร SR -> (month, date, slmcod, ชื่อลูกค้า upper) — แยกก้อนที่ระดับบรรทัดใน STCRD
+    sale_docs, sr_docs = {}, {}
     person_m = {}  # (slmcod, month) -> dict
     person_d = {}  # (slmcod, date)  -> dict
     def pm(sc, mk):
@@ -129,18 +136,39 @@ def main():
     def pd(sc, d):
         return person_d.setdefault((sc, d), dict(_P0))
 
+    # ---- ลูกค้าใหม่/ซื้อซ้ำ: ต้องรู้ "ซื้อครั้งแรกเมื่อไหร่" จากทั้งประวัติ ไม่ใช่แค่ใน window
+    # ตัดลูกค้าเงินสดออกเหมือน legacy (_mcust ตัด 'เงินสด'/'-'/ว่าง) — ของเราตัดจากชื่อ ARMAS
+    def is_cash(cc, nm):
+        n = (nm or "").replace("\xa0", " ").strip()
+        return (not cc) or ("เงินสด" in cc) or ("เงินสด" in n) or n in ("สด", "ลูกค้า สด", "-", "")
+    cust_first = {}   # cuscod -> วันที่ซื้อหน้าร้านครั้งแรก (ทั้งประวัติ)
+    cust_by_mk = {}   # month -> set(cuscod)
+    cust_by_day = {}  # date  -> set(cuscod)
+
     for r in S.read_dbf(os.path.join(src, "ARTRN.DBF"),
                         fields={"RECTYP", "DOCNUM", "DOCDAT", "SONUM", "SLMCOD", "CUSCOD",
-                                "NETAMT", "ADVAMT"}):
+                                "NETAMT", "ADVAMT", "DOCSTAT"}):
         dat = r.get("DOCDAT")
-        if not dat or dat < cutoff:
+        if not dat:
+            continue
+        rectyp = (r.get("RECTYP") or "").strip()
+        if (r.get("DOCSTAT") or "").strip() == "C":
+            continue  # เอกสารยกเลิก (NETAMT=0 อยู่แล้ว แต่ห้ามให้ปนเข้า bill_count/ลูกค้า)
+        cc = (r.get("CUSCOD") or "").strip()
+        seg = segment(cc, names.get(cc, "")) if rectyp in ("1", "3") else ""
+
+        # first-seen ของลูกค้า: ดูทั้งประวัติ "ก่อน" ตัดหน้าต่างเวลา — ไม่งั้นลูกค้าเก่าปี 67
+        # จะกลายเป็น "ลูกค้าใหม่" ของเดือนแรกใน window
+        if seg == "regular" and not is_cash(cc, names.get(cc, "")):
+            if cc not in cust_first or dat < cust_first[cc]:
+                cust_first[cc] = dat
+
+        if dat < cutoff:
             continue
         mk = month_key(dat)
         if mk not in keep_months:
             continue
-        rectyp = (r.get("RECTYP") or "").strip()
         v = float(r.get("NETAMT") or 0)
-        cc = (r.get("CUSCOD") or "").strip()
         sc = (r.get("SLMCOD") or "").strip()
         bb = (bm(mk), bd(dat))  # ยิงทั้งถังรายเดือนและรายวันพร้อมกัน — นิยามชุดเดียว
 
@@ -148,37 +176,34 @@ def main():
             for b in bb:
                 b["ai_tot"] += v
                 b["ai_cnt"] += 1
-        elif rectyp == "5":  # SR - คืนสินค้า/ลดหนี้
-            for b in bb:
-                b["ret_tot"] += v
-            if sc:
-                pm(sc, mk)["return_value"] += v
-                pd(sc, dat)["return_value"] += v
+        elif rectyp == "5":  # SR — แยก คืนจริง/%ช่าง/แพลตฟอร์ม ที่ระดับบรรทัดใน STCRD (ด้านล่าง)
+            sr_docs[(r.get("DOCNUM") or "").strip()] = (mk, dat, sc, (names.get(cc, "") or "").upper())
         elif rectyp in ("1", "3"):  # HS ขายเงินสด / IV ใบกำกับ = ยอดขายจริง
             # ยอดเต็มของบิล = NETAMT + ADVAMT — ถ้าลูกค้าวางมัดจำไว้ก่อน Express จะหักมัดจำ
             # ออกจาก NETAMT แล้ว นับแต่ NETAMT จึงได้ยอดขายต่ำกว่าจริง (1,102 บิล = 20.2M)
             # legacy build_all.py ใช้ NETAMT+ADVAMT มาตลอด ("NETAMT+ADVAMT=ยอดเต็ม")
             v += float(r.get("ADVAMT") or 0)
-            seg = segment(cc, names.get(cc, ""))
+            doc = (r.get("DOCNUM") or "").strip()
             if seg == "interbranch":
                 # ขายระหว่างสาขาไม่ใช่ยอดขาย — legacy แยกเป็น IVIB ไม่รวมยอดหน้าร้าน
-                # (เดิมบวกเข้า sales_tot ทำให้ยอดทุกหน้าจอเกินจริงปีละหลายสิบล้าน)
                 for b in bb:
                     b["interbranch_tot"] += v
             else:
                 # ยอดรายวัน (หน้าร้าน+ออนไลน์) = ตัวเดียวกับ _tot[b][0]+_tot[b][1] ของ legacy
-                # ใช้ทำการ์ด "วันนี้ทำได้" + หาเพซจากวันล่าสุดที่มีบิลจริง
                 dk = str(dat.day)
                 dm = day_m.setdefault(mk, {})
                 dm[dk] = round(dm.get(dk, 0.0) + v, 2)
+                sale_docs[doc] = (mk, dat, seg == "regular")
                 if seg == "online":
                     for b in bb:
                         b["online_tot"] += v
                 else:
                     for b in bb:
                         b["sales_tot"] += v
-                    # จำเลขเอกสารหน้าร้านไว้ ใช้จำกัด scope ของ GP ให้ตรงกับยอดขาย
-                    store_docs[(r.get("DOCNUM") or "").strip()] = (mk, dat)
+                        b["bill_count"] += 1
+                    if not is_cash(cc, names.get(cc, "")):
+                        cust_by_mk.setdefault(mk, set()).add(cc)
+                        cust_by_day.setdefault(dat, set()).add(cc)
                     if sc:
                         for p in (pm(sc, mk), pd(sc, dat)):
                             p["net_sales"] += v
@@ -186,15 +211,33 @@ def main():
                             if v >= 100000:
                                 p["big_deal_value"] += v
                                 p["big_deal_count"] += 1
-            # cycle time: SO->IV/HS (ใช้ทุก segment รวมออนไลน์/ระหว่างสาขาด้วย เหมือน legacy)
-            sn = (r.get("SONUM") or "").strip()
-            so = so_by_num.get(sn)
-            if so and so.get("sodat"):
-                cd = (dat - datetime.date.fromisoformat(so["sodat"])).days
-                if cd >= 0:
-                    for b in bb:
-                        b["cycle_days_sum"] += cd
-                        b["cycle_days_n"] += 1
+                    # cycle time SO->IV/HS: legacy คิดเฉพาะบิลหน้าร้าน (block ใน else หลังเช็ค
+                    # online ของ build_all) — เดิมเข้าใจผิดว่ารวมทุก segment
+                    sn = (r.get("SONUM") or "").strip()
+                    so = so_by_num.get(sn)
+                    if so and so.get("sodat"):
+                        cd = (dat - datetime.date.fromisoformat(so["sodat"])).days
+                        if cd >= 0:
+                            for b in bb:
+                                b["cycle_days_sum"] += cd
+                                b["cycle_days_n"] += 1
+                                if cd <= 1:
+                                    b["cycle_le1_n"] += 1  # ตัวตั้งของ "ตอบใน 24 ชม." (resp24)
+
+    # ---- สรุปลูกค้าใหม่/ซื้อซ้ำ (หน้าร้าน ไม่นับเงินสด) ----
+    # รายเดือน: ใหม่ = เดือนแรกที่เคยซื้อ == เดือนนี้ · ซื้อซ้ำ = เคยซื้อก่อนหน้า (นิยาม legacy)
+    # รายวัน: เทียบ "ก่อนวันนั้น" — ผลรวมข้ามหลายวันของ cust_total เป็นลูกค้า-วัน (นับหัวซ้ำได้)
+    # แต่ cust_new รวมข้ามวันแล้วยังถูกต้อง (ลูกค้าใหม่มีวันแรกวันเดียว)
+    for mk, ccs in cust_by_mk.items():
+        b = bm(mk)
+        b["cust_total"] = len(ccs)
+        b["cust_new"] = sum(1 for c in ccs if month_key(cust_first[c]) == mk)
+        b["cust_repeat"] = sum(1 for c in ccs if cust_first[c] < datetime.date(int(mk[:4]), int(mk[5:7]), 1))
+    for d, ccs in cust_by_day.items():
+        b = bd(d)
+        b["cust_total"] = len(ccs)
+        b["cust_new"] = sum(1 for c in ccs if cust_first[c] == d)
+        b["cust_repeat"] = sum(1 for c in ccs if cust_first[c] < d)
 
     # GP% จริง — STCRD.DBF (stock ledger): XUNITPR = ต้นทุนต่อหน่วย ณ เวลาขาย
     # (ยืนยันจากข้อมูลจริงแล้ว — LOTVAL/LUNITPR ที่คิดว่าจะใช้ได้ กลับเป็น 0 เสมอ ไม่ได้ใช้จริง)
@@ -204,24 +247,99 @@ def main():
     #  _sbc_gp ว่า "ตัด online O + interbranch C/J — scope เดียวกับ salesTot")
     # และ XUNITPR>0 เท่านั้น (สินค้าบางตัวไม่มีต้นทุนแยก เช่น อุปกรณ์เสริมที่รวมในแผ่นหลัก — ข้ามทั้ง 2 ฝั่ง กันดันมาร์จิ้นเพี้ยน)
     # month มาจาก store_docs ไม่ใช่ DOCDAT ของ STCRD — กัน GP ไปตกคนละเดือนกับยอดขายบิลเดียวกัน
+    # ---- ลิสต์ขายดี: parse ความหนา 0.xx จากชื่อสินค้า (กติกาเดียวกับ legacy cb/cb2) ----
+    _thick = re.compile(r"^0\.\d{2}$")
+    CB2_PREFIX = ("01WP", "01WC", "01P3", "01P5")
+    coil_m, coil2_m, coil_d, coil2_d = {}, {}, {}, {}
+    def coil_label(desc):
+        toks = re.split(r"[\s\xa0]+", desc or "")
+        for i, t in enumerate(toks):
+            if _thick.match(t):
+                return "%s %s %s" % (toks[i - 1] if i >= 1 else "?", t,
+                                     toks[i + 1] if i + 1 < len(toks) else "?")
+        return None
+
+    # STCRD (stock ledger) รอบเดียว ใช้ 4 งาน — บรรทัดสินค้าของทุกเอกสารอยู่ที่นี่:
+    #   IV/HS หน้าร้าน -> GP (scope เดียวกับ sales_tot ตาม _sbc_gp ของ legacy)
+    #   IV/HS หน้าร้าน+ออนไลน์ -> ลิสต์ขายดีคอยล์ (legacy DET รวมออนไลน์)
+    #   SR -> แยก คืนจริง/%ช่าง/แพลตฟอร์ม ที่ระดับบรรทัด (กติกา build_all.py:490-497)
+    #   RR -> ยอดรับซื้อเข้า (BUYVAL ของจอเดิม)
     for r in S.read_dbf(os.path.join(src, "STCRD.DBF"),
-                        fields={"DOCNUM", "SLMCOD", "TRNQTY", "UNITPR", "TRNVAL", "XUNITPR"}):
-        hit = store_docs.get((r.get("DOCNUM") or "").strip())
+                        fields={"DOCNUM", "DOCDAT", "SLMCOD", "TRNQTY", "UNITPR",
+                                "TRNVAL", "XUNITPR", "STKCOD", "STKDES"}):
+        doc = (r.get("DOCNUM") or "").strip()
+        trnval = float(r.get("TRNVAL") or 0)
+
+        if doc.startswith("RR"):  # รับของเข้าสต็อก = ยอดรับซื้อ
+            dat = r.get("DOCDAT")
+            if not dat or dat < cutoff:
+                continue
+            mk = month_key(dat)
+            if mk in keep_months:
+                bm(mk)["buy_tot"] += trnval
+                bd(dat)["buy_tot"] += trnval
+            continue
+
+        sr = sr_docs.get(doc)
+        if sr is not None:  # บรรทัดของเอกสาร SR — แยกก้อนตามชนิดบรรทัด
+            if trnval <= 0:
+                continue
+            mk, dat, sc, cn = sr
+            code = (r.get("STKCOD") or "").strip().upper()
+            desc = (r.get("STKDES") or "").replace("\xa0", " ")
+            iscomm = (code.startswith(("07COMM", "07COMI")) or "เปอร์เซ็นต์ช่าง" in desc
+                      or "ผู้รับเหมา" in desc or "คอมมิช" in desc)
+            if iscomm:
+                isplat = ("ONLINE" in code or "REFUND" in code or "แพล" in desc
+                          or any(p in cn for p in PLATFORMS))
+                key = "plat_tot" if isplat else "comm_tot"
+                bm(mk)[key] += trnval
+                bd(dat)[key] += trnval
+                if sc and not isplat:  # %ช่างรายคน (การ์ดรายคนบน leaderboard เดิม)
+                    for p in (pm(sc, mk), pd(sc, dat)):
+                        p["comm_value"] += trnval
+                        p["comm_count"] += 1
+            else:
+                bm(mk)["ret_tot"] += trnval
+                bd(dat)["ret_tot"] += trnval
+                if sc:
+                    pm(sc, mk)["return_value"] += trnval
+                    pd(sc, dat)["return_value"] += trnval
+            continue
+
+        hit = sale_docs.get(doc)
         if hit is None:
             continue
-        mk, dat = hit
+        mk, dat, is_store = hit
+
+        stk = (r.get("STKCOD") or "").strip().upper()
+        if stk.startswith("01"):
+            lab = coil_label(r.get("STKDES"))
+            if lab:
+                cm, cd_ = (coil2_m, coil2_d) if stk.startswith(CB2_PREFIX) else (coil_m, coil_d)
+                qd = cm.setdefault(mk, {})
+                qd[lab] = round(qd.get(lab, 0.0) + float(r.get("TRNQTY") or 0), 2)
+                qd = cd_.setdefault(dat, {})
+                qd[lab] = round(qd.get(lab, 0.0) + float(r.get("TRNQTY") or 0), 2)
+
+        if not is_store:
+            continue
         xunitpr = float(r.get("XUNITPR") or 0)
         if xunitpr <= 0:
             continue
-        sc = (r.get("SLMCOD") or "").strip()
-        if not sc:
-            continue
         qty = float(r.get("TRNQTY") or 0)
         unitpr = float(r.get("UNITPR") or 0)
-        trnval = float(r.get("TRNVAL") or 0)
-        for p in (pm(sc, mk), pd(sc, dat)):
-            p["gp_value"] += qty * (unitpr - xunitpr)
-            p["gp_base"] += trnval
+        gpv = qty * (unitpr - xunitpr)
+        # ระดับสาขา: รวมทุกบรรทัด (บิลไม่มีรหัสเซลล์ก็นับ) — ตัวเลข "กำไรขั้นต้น" ของ KPI
+        bm(mk)["gp_value"] += gpv
+        bm(mk)["gp_base"] += trnval
+        bd(dat)["gp_value"] += gpv
+        bd(dat)["gp_base"] += trnval
+        sc = (r.get("SLMCOD") or "").strip()
+        if sc:
+            for p in (pm(sc, mk), pd(sc, dat)):
+                p["gp_value"] += gpv
+                p["gp_base"] += trnval
 
     # so_value ต่อเซลล์ (lead-axis proxy แบบง่าย = มูลค่า SO ที่ SLMCOD คนนั้นออกเดือนนี้)
     for r in S.read_dbf(os.path.join(src, "OESO.DBF"), fields={"SODAT", "SLMCOD", "NETAMT"}):
@@ -238,7 +356,8 @@ def main():
             pd(sc, sod)["so_value"] += v
 
     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
-    branch_batch = [dict(v, branch=branch, month=mk, synced_at=now_iso, day_tot=day_m.get(mk, {}))
+    branch_batch = [dict(v, branch=branch, month=mk, synced_at=now_iso, day_tot=day_m.get(mk, {}),
+                         coil_top=coil_m.get(mk, {}), coil_top2=coil2_m.get(mk, {}))
                     for mk, v in branch_m.items()]
     person_batch = [dict(v, branch=branch, slmcod=sc, month=mk, synced_at=now_iso) for (sc, mk), v in person_m.items()]
 
@@ -273,7 +392,8 @@ def main():
     recent = {month_key(today), month_key(prev)}
     pick = (lambda d: True) if full else (lambda d: month_key(d) in recent)
 
-    day_batch = [dict(v, branch=branch, day=d.isoformat(), synced_at=now_iso)
+    day_batch = [dict(v, branch=branch, day=d.isoformat(), synced_at=now_iso,
+                      coil_top=coil_d.get(d, {}), coil_top2=coil2_d.get(d, {}))
                  for d, v in branch_d.items() if pick(d)]
     pday_batch = [dict(v, branch=branch, slmcod=sc, day=d.isoformat(), synced_at=now_iso)
                   for (sc, d), v in person_d.items() if pick(d)]

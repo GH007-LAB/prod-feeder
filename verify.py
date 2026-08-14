@@ -162,6 +162,7 @@ def main():
     exp = collections.defaultdict(lambda: collections.Counter())  # month -> ยอดแต่ละประเภท
     exp_day = collections.defaultdict(lambda: collections.Counter())  # month -> {วัน: ยอด}
     bills = 0  # บิลขายที่ไม่ถูกยกเลิก (เทียบกับ express_bill)
+    sr_mk = {}  # เอกสาร SR -> month (ไว้รวมบรรทัดใน STCRD เทียบ ret+comm+plat)
     for r in S.read_dbf(os.path.join(src, "ARTRN.DBF"),
                         fields={"RECTYP", "DOCNUM", "DOCDAT", "CUSCOD", "NETAMT", "ADVAMT",
                                 "DISCAMT", "SLMCOD", "DOCSTAT"}):
@@ -170,15 +171,15 @@ def main():
             continue
         mk = "%04d-%02d" % (dat.year, dat.month)
         rectyp = (r.get("RECTYP") or "").strip()
+        if (r.get("DOCSTAT") or "").strip() == "C":
+            continue
         net = float(r.get("NETAMT") or 0)
         if rectyp == "0":
             exp[mk]["ai_tot"] += net
             exp[mk]["ai_cnt"] += 1
         elif rectyp == "5":
-            exp[mk]["ret_tot"] += net
+            sr_mk[(r.get("DOCNUM") or "").strip()] = mk
         elif rectyp in SALE_RECTYP:
-            if (r.get("DOCSTAT") or "").strip() == "C":
-                continue
             bills += 1
             cc = (r.get("CUSCOD") or "").strip()
             v = net + float(r.get("ADVAMT") or 0)  # ยอดเต็ม build_all.py:217
@@ -187,11 +188,24 @@ def main():
             if seg != "interbranch":
                 exp_day[mk][str(dat.day)] += v
             if seg == "regular":
+                exp[mk]["bill_count"] += 1
                 # บิลหน้าร้านที่ไม่มีรหัสเซลล์ -> เข้ายอดสาขาแต่ไม่เข้ายอดรายคน (มีจริงเดือนละ 0-2 ใบ)
                 if not (r.get("SLMCOD") or "").strip():
                     exp[mk]["no_slm"] += v
                 # ส่วนลดท้ายบิลลด NETAMT แต่ไม่ลด TRNVAL รายบรรทัด -> gp_base สูงกว่ายอดขายได้เท่านี้
                 exp[mk]["discamt"] += float(r.get("DISCAMT") or 0)
+
+    # SR แยกก้อน + ยอดรับซื้อ: นับจากบรรทัดใน STCRD (แหล่งเดียวกับ feeder แต่เขียนตรวจแยก)
+    for r in S.read_dbf(os.path.join(src, "STCRD.DBF"), fields={"DOCNUM", "DOCDAT", "TRNVAL"}):
+        doc = (r.get("DOCNUM") or "").strip()
+        if doc.startswith("RR"):
+            dat = r.get("DOCDAT")
+            if dat:
+                exp["%04d-%02d" % (dat.year, dat.month)]["buy_tot"] += float(r.get("TRNVAL") or 0)
+        elif doc in sr_mk:
+            amt = float(r.get("TRNVAL") or 0)
+            if amt > 0:
+                exp[sr_mk[doc]]["sr_lines"] += amt
 
     # ---------- ทาบกับ Supabase ----------
     rows = sb_get(cfg, "/rest/v1/sopo_branch_month?select=*&branch=eq.%s" % branch)
@@ -208,8 +222,14 @@ def main():
         chk("%s sales_tot" % mk, float(r["sales_tot"] or 0), e["regular"], MONEY_TOL)
         chk("%s online_tot" % mk, float(r["online_tot"] or 0), e["online"], MONEY_TOL)
         chk("%s interbranch_tot" % mk, float(r["interbranch_tot"] or 0), e["interbranch"], MONEY_TOL)
-        chk("%s ret_tot" % mk, float(r["ret_tot"] or 0), e["ret_tot"], MONEY_TOL)
         chk("%s ai_tot" % mk, float(r["ai_tot"] or 0), e["ai_tot"], MONEY_TOL)
+        chk("%s bill_count" % mk, float(r.get("bill_count") or 0), e["bill_count"], 0)
+        chk("%s buy_tot" % mk, float(r.get("buy_tot") or 0), e["buy_tot"], MONEY_TOL)
+        # ret+comm+plat = ผลรวมบรรทัด SR ทั้งหมด (การแยกก้อนตรวจไม่ได้โดยไม่ก๊อปกติกามา
+        # แต่ผลรวมต้องไม่ตกหล่น — บรรทัดที่หายไปจะโผล่ที่นี่)
+        chk("%s ret+comm+plat = บรรทัด SR" % mk,
+            float(r["ret_tot"] or 0) + float(r.get("comm_tot") or 0) + float(r.get("plat_tot") or 0),
+            e["sr_lines"], MONEY_TOL)
 
         # 2) ยอดรายวันรวมกันต้องเท่ายอดเดือน (หน้าร้าน+ออนไลน์)
         dt = r.get("day_tot") or {}
@@ -259,14 +279,18 @@ def main():
     # 6) express_bill ต้องมีบิลครบเท่า DBF และยอดต้องเป็นยอดเต็ม (ต้องใช้ service key)
     # 4.5) ตารางรายวัน: ผลรวมต่อเดือนต้องเท่าตารางรายเดือนเป๊ะ (แหล่งเดียวกัน คนละ granularity)
     # ถ้าตารางยังไม่ถูกสร้าง (ยังไม่รัน sopo-app/sql/sopo_daily.sql) ข้ามเงียบ ๆ
+    # cust_repeat/cust_total ไม่อยู่ในลิสต์ — นิยามรายวัน (เทียบก่อนวันนั้น) รวมแล้วไม่เท่ารายเดือน
+    DAY_COLS = ("sales_tot", "online_tot", "interbranch_tot", "ret_tot", "comm_tot", "plat_tot",
+                "buy_tot", "ai_tot", "bill_count", "cycle_le1_n", "cust_new", "gp_value", "gp_base")
     try:
-        drows = sb_get_all(cfg, "/rest/v1/sopo_branch_day?select=day,sales_tot,online_tot,interbranch_tot,ret_tot,ai_tot&branch=eq.%s&order=day" % branch)
+        drows = sb_get_all(cfg, "/rest/v1/sopo_branch_day?select=day,%s&branch=eq.%s&order=day"
+                           % (",".join(DAY_COLS), branch))
     except urllib.error.HTTPError:
         drows = None
     if drows is not None:
         dsum = collections.defaultdict(lambda: collections.Counter())
         for r in drows:
-            for k in ("sales_tot", "online_tot", "interbranch_tot", "ret_tot", "ai_tot"):
+            for k in DAY_COLS:
                 dsum[r["day"][:7]][k] += float(r[k] or 0)
         for mk, r in sorted(db.items()):
             if mk not in dsum:
@@ -274,8 +298,8 @@ def main():
                     rep.note_fail("%s ไม่มีแถวใน sopo_branch_day" % mk, "รายเดือนมี %s" % _f(float(r["sales_tot"] or 0)))
                 continue
             chk = rep.check_live if mk == live_mk else rep.check
-            for k in ("sales_tot", "online_tot", "interbranch_tot", "ret_tot", "ai_tot"):
-                chk("%s รายวันรวม = รายเดือน (%s)" % (mk, k), dsum[mk][k], float(r[k] or 0), MONEY_TOL)
+            for k in DAY_COLS:
+                chk("%s รายวันรวม = รายเดือน (%s)" % (mk, k), dsum[mk][k], float(r.get(k) or 0), MONEY_TOL)
         # order ต้องเป็น unique key เต็ม (day,slmcod) — เรียงแค่ day แล้วแถววันเดียวกันสลับ
         # ข้ามหน้า pagination ได้ ทำให้นับซ้ำ/หลุดแบบสุ่ม (เจอมาแล้ว: BK +1,554 / SKN -32,514)
         pdrows = sb_get_all(cfg, "/rest/v1/sopo_person_day?select=day,net_sales,gp_base&branch=eq.%s&order=day,slmcod" % branch)
