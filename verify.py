@@ -18,7 +18,7 @@ usage: python3 verify.py <config_file> [--now]
 
 อ่าน log: grep VERIFY ~/007so_push/feeder.log   ·   ดูเฉพาะที่ผิด: grep 'VERIFY-FAIL'
 """
-import sys, os, re, json, datetime, urllib.request, collections
+import sys, os, re, json, datetime, urllib.request, urllib.error, collections
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import so_push as S
@@ -53,6 +53,24 @@ def sb_get(cfg, path, key=None):
     req = urllib.request.Request(url, headers={"apikey": k, "Authorization": "Bearer " + k})
     with urllib.request.urlopen(req, timeout=30) as resp:
         return json.loads(resp.read())
+
+
+def sb_get_all(cfg, path, key=None, page=1000):
+    """อ่านทุกแถวด้วย Range pagination — PostgREST ตัดที่ 1000 แถว/คำขอ (max-rows)
+    ถ้าใช้ sb_get เฉย ๆ กับตารางใหญ่ ตัวตรวจจะรวมยอดจากแถวไม่ครบแล้วฟ้องผิด ๆ เอง"""
+    k = key or cfg["SUPABASE_KEY"]
+    out, offset = [], 0
+    while True:
+        req = urllib.request.Request(cfg["SUPABASE_URL"].rstrip("/") + path, headers={
+            "apikey": k, "Authorization": "Bearer " + k,
+            "Range-Unit": "items", "Range": "%d-%d" % (offset, offset + page - 1),
+        })
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            chunk = json.loads(resp.read())
+        out.extend(chunk)
+        if len(chunk) < page:
+            return out
+        offset += page
 
 
 def sb_count(cfg, path, key=None):
@@ -239,11 +257,48 @@ def main():
                   sum(float(r["sales_tot"] or 0) for r in y25), ANCHOR_2025_STORE, 1000.0)
 
     # 6) express_bill ต้องมีบิลครบเท่า DBF และยอดต้องเป็นยอดเต็ม (ต้องใช้ service key)
+    # 4.5) ตารางรายวัน: ผลรวมต่อเดือนต้องเท่าตารางรายเดือนเป๊ะ (แหล่งเดียวกัน คนละ granularity)
+    # ถ้าตารางยังไม่ถูกสร้าง (ยังไม่รัน sopo-app/sql/sopo_daily.sql) ข้ามเงียบ ๆ
+    try:
+        drows = sb_get_all(cfg, "/rest/v1/sopo_branch_day?select=day,sales_tot,online_tot,interbranch_tot,ret_tot,ai_tot&branch=eq.%s&order=day" % branch)
+    except urllib.error.HTTPError:
+        drows = None
+    if drows is not None:
+        dsum = collections.defaultdict(lambda: collections.Counter())
+        for r in drows:
+            for k in ("sales_tot", "online_tot", "interbranch_tot", "ret_tot", "ai_tot"):
+                dsum[r["day"][:7]][k] += float(r[k] or 0)
+        for mk, r in sorted(db.items()):
+            if mk not in dsum:
+                if float(r["sales_tot"] or 0) > 0:
+                    rep.note_fail("%s ไม่มีแถวใน sopo_branch_day" % mk, "รายเดือนมี %s" % _f(float(r["sales_tot"] or 0)))
+                continue
+            chk = rep.check_live if mk == live_mk else rep.check
+            for k in ("sales_tot", "online_tot", "interbranch_tot", "ret_tot", "ai_tot"):
+                chk("%s รายวันรวม = รายเดือน (%s)" % (mk, k), dsum[mk][k], float(r[k] or 0), MONEY_TOL)
+        # order ต้องเป็น unique key เต็ม (day,slmcod) — เรียงแค่ day แล้วแถววันเดียวกันสลับ
+        # ข้ามหน้า pagination ได้ ทำให้นับซ้ำ/หลุดแบบสุ่ม (เจอมาแล้ว: BK +1,554 / SKN -32,514)
+        pdrows = sb_get_all(cfg, "/rest/v1/sopo_person_day?select=day,net_sales,gp_base&branch=eq.%s&order=day,slmcod" % branch)
+        pdsum = collections.defaultdict(lambda: collections.Counter())
+        for r in pdrows:
+            pdsum[r["day"][:7]]["net_sales"] += float(r["net_sales"] or 0)
+            pdsum[r["day"][:7]]["gp_base"] += float(r["gp_base"] or 0)
+        for mk, p in sorted(pm.items()):
+            if mk not in pdsum:
+                if p["net_sales"] > 0:
+                    rep.note_fail("%s ไม่มีแถวใน sopo_person_day" % mk, "รายเดือนมี %s" % _f(p["net_sales"]))
+                continue
+            chk = rep.check_live if mk == live_mk else rep.check
+            chk("%s person รายวันรวม = รายเดือน (net_sales)" % mk, pdsum[mk]["net_sales"], p["net_sales"], MONEY_TOL)
+            chk("%s person รายวันรวม = รายเดือน (gp_base)" % mk, pdsum[mk]["gp_base"], p["gp_base"], MONEY_TOL)
+
     # express_sync ทำงานชั่วโมงละครั้ง จึงตามหลัง DBF ได้ตามปกติ — ฟ้องเฉพาะตอนที่เกินจริง
     # (บิลใน DB มากกว่าที่มีอยู่จริง) หรือขาดเกิน 10% (sync ค้าง/ไม่มี service key มานาน)
+    # ตัดแถวที่ iv ไม่ขึ้นต้น IV/HS ออก — มีแถวปลอม 1 แถวจาก import เดิม (SKN iv='SO6904795'
+    # ใส่เลข SO แทนเพราะยังไม่ออกใบกำกับ) ซึ่งไม่มีคู่ใน ARTRN โดยธรรมชาติ ไม่ใช่ sync พัง
     if svc:
-        rep.check_live("express_bill จำนวนบิล",
-                       sb_count(cfg, "/rest/v1/express_bill?select=id&branch=eq.%s" % branch, key=svc), bills)
+        n_eb = sb_count(cfg, "/rest/v1/express_bill?select=id&branch=eq.%s&or=(iv.like.IV*,iv.like.HS*)" % branch, key=svc)
+        rep.check_live("express_bill จำนวนบิล", n_eb, bills)
     rep.done()
 
 

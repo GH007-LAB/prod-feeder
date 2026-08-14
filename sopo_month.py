@@ -1,15 +1,18 @@
 # -*- coding: utf-8 -*-
 """
-007 Metals - SOPO Dashboard monthly aggregates (Phase 2a)
+007 Metals - SOPO Dashboard aggregates (รายเดือน + รายวัน)
 อ่าน ARTRN.DBF (RECTYP: 0=AI มัดจำ, 1=HS ขายเงินสด, 3=IV ใบกำกับ, 5=SR คืนสินค้า)
-+ so_live ที่ prod-feeder sync ไว้แล้ว (Supabase) -> คำนวณสรุปรายเดือนต่อสาขา/ต่อเซลล์
-เขียนเข้า sopo_branch_month / sopo_person_month (ดู sopo-app/sql/sopo_dashboard.sql)
++ so_live ที่ prod-feeder sync ไว้แล้ว (Supabase) -> คำนวณสรุปต่อสาขา/ต่อเซลล์
+เขียนเข้า sopo_branch_month / sopo_person_month (sopo-app/sql/sopo_dashboard.sql)
+และ sopo_branch_day / sopo_person_day (sopo-app/sql/sopo_daily.sql) ใน pass เดียวกัน
+— รายวันคือตัวที่ทำให้หน้าจอเลือกช่วงเวลาได้เหมือน SOPO เดิม (เดือน/สัปดาห์/วัน/กำหนดเอง)
 
-ระดับเดือนเท่านั้น (v1) — ไม่ทำ week/day/custom-range ยังไม่ทำ commission/platform-fee
-sub-split ของ SR (รวมเป็น ret_tot เดียว), ไม่ทำ dedup lead-axis แบบ jaccard (ใช้
-so_value ตรงๆ เป็นตัวแทนง่ายๆ) — ตามที่ตกลงไว้
+ยังไม่ทำ commission/platform-fee sub-split ของ SR (รวมเป็น ret_tot เดียว), ไม่ทำ
+dedup lead-axis แบบ jaccard (ใช้ so_value ตรงๆ เป็นตัวแทนง่ายๆ) — ตามที่ตกลงไว้
 
-usage: python sopo_month.py <config_file> [--dry]
+usage: python sopo_month.py <config_file> [--dry] [--full]
+   --full = push รายวันทั้ง 20 เดือน (ปกติรอบ 10 นาที push แค่เดือนนี้+เดือนก่อน
+   เพราะเดือนเก่าไม่ขยับแล้ว — ครั้งแรกที่ไม่มี state marker จะ full เองอัตโนมัติ)
 """
 import sys, os, json, datetime, urllib.request, urllib.error, urllib.parse, re
 
@@ -84,15 +87,17 @@ def main():
     so_rows = sb_get(cfg, "/rest/v1/so_live?branch=eq.%s&select=sonum,sodat,netamt,docstat" % branch)
     so_by_num = {r["sonum"]: r for r in so_rows if r.get("sonum")}
 
+    _B0 = {"sales_tot": 0.0, "online_tot": 0.0, "interbranch_tot": 0.0,
+           "ret_tot": 0.0, "ai_tot": 0.0, "ai_cnt": 0,
+           "so_issued_value": 0.0, "open_value": 0.0, "open_count": 0,
+           "cycle_days_sum": 0.0, "cycle_days_n": 0}
     branch_m = {}  # month -> dict
+    branch_d = {}  # date  -> dict (คอลัมน์ชุดเดียวกัน แค่ granularity = วัน)
     day_m = {}     # month -> {"วันที่": ยอดหน้าร้าน+ออนไลน์ของวันนั้น}
     def bm(mk):
-        return branch_m.setdefault(mk, {
-            "sales_tot": 0.0, "online_tot": 0.0, "interbranch_tot": 0.0,
-            "ret_tot": 0.0, "ai_tot": 0.0, "ai_cnt": 0,
-            "so_issued_value": 0.0, "open_value": 0.0, "open_count": 0,
-            "cycle_days_sum": 0.0, "cycle_days_n": 0,
-        })
+        return branch_m.setdefault(mk, dict(_B0))
+    def bd(d):
+        return branch_d.setdefault(d, dict(_B0))
 
     for sn, r in so_by_num.items():
         sodat = r.get("sodat")
@@ -103,24 +108,26 @@ def main():
         if mk not in keep_months:
             continue
         v = float(r.get("netamt") or 0)
-        b = bm(mk)
-        b["so_issued_value"] += v
-        if (r.get("docstat") or "").strip() != "M" and v > 0:
-            b["open_value"] += v
-            b["open_count"] += 1
+        for b in (bm(mk), bd(d)):
+            b["so_issued_value"] += v
+            if (r.get("docstat") or "").strip() != "M" and v > 0:
+                b["open_value"] += v
+                b["open_count"] += 1
 
     # ---- ชื่อลูกค้า (ARMAS) สำหรับแยก segment (online/interbranch/regular) ----
     names = {}
     for r in S.read_dbf(os.path.join(src, "ARMAS.DBF"), fields={"CUSCOD", "PRENAM", "CUSNAM"}):
         names[r.get("CUSCOD", "")] = (r.get("PRENAM", "") + " " + r.get("CUSNAM", "")).strip()
 
-    store_docs = {}  # DOCNUM ของบิลหน้าร้าน -> month (ไม่รวมออนไลน์/ระหว่างสาขา)
+    _P0 = {"net_sales": 0.0, "bill_count": 0, "big_deal_value": 0.0, "big_deal_count": 0,
+           "return_value": 0.0, "so_value": 0.0, "gp_value": 0.0, "gp_base": 0.0}
+    store_docs = {}  # DOCNUM ของบิลหน้าร้าน -> (month, date) — ไม่รวมออนไลน์/ระหว่างสาขา
     person_m = {}  # (slmcod, month) -> dict
+    person_d = {}  # (slmcod, date)  -> dict
     def pm(sc, mk):
-        return person_m.setdefault((sc, mk), {
-            "net_sales": 0.0, "bill_count": 0, "big_deal_value": 0.0, "big_deal_count": 0,
-            "return_value": 0.0, "so_value": 0.0, "gp_value": 0.0, "gp_base": 0.0,
-        })
+        return person_m.setdefault((sc, mk), dict(_P0))
+    def pd(sc, d):
+        return person_d.setdefault((sc, d), dict(_P0))
 
     for r in S.read_dbf(os.path.join(src, "ARTRN.DBF"),
                         fields={"RECTYP", "DOCNUM", "DOCDAT", "SONUM", "SLMCOD", "CUSCOD",
@@ -135,15 +142,18 @@ def main():
         v = float(r.get("NETAMT") or 0)
         cc = (r.get("CUSCOD") or "").strip()
         sc = (r.get("SLMCOD") or "").strip()
-        b = bm(mk)
+        bb = (bm(mk), bd(dat))  # ยิงทั้งถังรายเดือนและรายวันพร้อมกัน — นิยามชุดเดียว
 
         if rectyp == "0":  # AI - เงินมัดจำ
-            b["ai_tot"] += v
-            b["ai_cnt"] += 1
+            for b in bb:
+                b["ai_tot"] += v
+                b["ai_cnt"] += 1
         elif rectyp == "5":  # SR - คืนสินค้า/ลดหนี้
-            b["ret_tot"] += v
+            for b in bb:
+                b["ret_tot"] += v
             if sc:
                 pm(sc, mk)["return_value"] += v
+                pd(sc, dat)["return_value"] += v
         elif rectyp in ("1", "3"):  # HS ขายเงินสด / IV ใบกำกับ = ยอดขายจริง
             # ยอดเต็มของบิล = NETAMT + ADVAMT — ถ้าลูกค้าวางมัดจำไว้ก่อน Express จะหักมัดจำ
             # ออกจาก NETAMT แล้ว นับแต่ NETAMT จึงได้ยอดขายต่ำกว่าจริง (1,102 บิล = 20.2M)
@@ -153,7 +163,8 @@ def main():
             if seg == "interbranch":
                 # ขายระหว่างสาขาไม่ใช่ยอดขาย — legacy แยกเป็น IVIB ไม่รวมยอดหน้าร้าน
                 # (เดิมบวกเข้า sales_tot ทำให้ยอดทุกหน้าจอเกินจริงปีละหลายสิบล้าน)
-                b["interbranch_tot"] += v
+                for b in bb:
+                    b["interbranch_tot"] += v
             else:
                 # ยอดรายวัน (หน้าร้าน+ออนไลน์) = ตัวเดียวกับ _tot[b][0]+_tot[b][1] ของ legacy
                 # ใช้ทำการ์ด "วันนี้ทำได้" + หาเพซจากวันล่าสุดที่มีบิลจริง
@@ -161,26 +172,29 @@ def main():
                 dm = day_m.setdefault(mk, {})
                 dm[dk] = round(dm.get(dk, 0.0) + v, 2)
                 if seg == "online":
-                    b["online_tot"] += v
+                    for b in bb:
+                        b["online_tot"] += v
                 else:
-                    b["sales_tot"] += v
+                    for b in bb:
+                        b["sales_tot"] += v
                     # จำเลขเอกสารหน้าร้านไว้ ใช้จำกัด scope ของ GP ให้ตรงกับยอดขาย
-                    store_docs[(r.get("DOCNUM") or "").strip()] = mk
+                    store_docs[(r.get("DOCNUM") or "").strip()] = (mk, dat)
                     if sc:
-                        p = pm(sc, mk)
-                        p["net_sales"] += v
-                        p["bill_count"] += 1
-                        if v >= 100000:
-                            p["big_deal_value"] += v
-                            p["big_deal_count"] += 1
+                        for p in (pm(sc, mk), pd(sc, dat)):
+                            p["net_sales"] += v
+                            p["bill_count"] += 1
+                            if v >= 100000:
+                                p["big_deal_value"] += v
+                                p["big_deal_count"] += 1
             # cycle time: SO->IV/HS (ใช้ทุก segment รวมออนไลน์/ระหว่างสาขาด้วย เหมือน legacy)
             sn = (r.get("SONUM") or "").strip()
             so = so_by_num.get(sn)
             if so and so.get("sodat"):
                 cd = (dat - datetime.date.fromisoformat(so["sodat"])).days
                 if cd >= 0:
-                    b["cycle_days_sum"] += cd
-                    b["cycle_days_n"] += 1
+                    for b in bb:
+                        b["cycle_days_sum"] += cd
+                        b["cycle_days_n"] += 1
 
     # GP% จริง — STCRD.DBF (stock ledger): XUNITPR = ต้นทุนต่อหน่วย ณ เวลาขาย
     # (ยืนยันจากข้อมูลจริงแล้ว — LOTVAL/LUNITPR ที่คิดว่าจะใช้ได้ กลับเป็น 0 เสมอ ไม่ได้ใช้จริง)
@@ -192,9 +206,10 @@ def main():
     # month มาจาก store_docs ไม่ใช่ DOCDAT ของ STCRD — กัน GP ไปตกคนละเดือนกับยอดขายบิลเดียวกัน
     for r in S.read_dbf(os.path.join(src, "STCRD.DBF"),
                         fields={"DOCNUM", "SLMCOD", "TRNQTY", "UNITPR", "TRNVAL", "XUNITPR"}):
-        mk = store_docs.get((r.get("DOCNUM") or "").strip())
-        if mk is None:
+        hit = store_docs.get((r.get("DOCNUM") or "").strip())
+        if hit is None:
             continue
+        mk, dat = hit
         xunitpr = float(r.get("XUNITPR") or 0)
         if xunitpr <= 0:
             continue
@@ -204,9 +219,9 @@ def main():
         qty = float(r.get("TRNQTY") or 0)
         unitpr = float(r.get("UNITPR") or 0)
         trnval = float(r.get("TRNVAL") or 0)
-        p = pm(sc, mk)
-        p["gp_value"] += qty * (unitpr - xunitpr)
-        p["gp_base"] += trnval
+        for p in (pm(sc, mk), pd(sc, dat)):
+            p["gp_value"] += qty * (unitpr - xunitpr)
+            p["gp_base"] += trnval
 
     # so_value ต่อเซลล์ (lead-axis proxy แบบง่าย = มูลค่า SO ที่ SLMCOD คนนั้นออกเดือนนี้)
     for r in S.read_dbf(os.path.join(src, "OESO.DBF"), fields={"SODAT", "SLMCOD", "NETAMT"}):
@@ -218,7 +233,9 @@ def main():
             continue
         sc = (r.get("SLMCOD") or "").strip()
         if sc:
-            pm(sc, mk)["so_value"] += float(r.get("NETAMT") or 0)
+            v = float(r.get("NETAMT") or 0)
+            pm(sc, mk)["so_value"] += v
+            pd(sc, sod)["so_value"] += v
 
     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
     branch_batch = [dict(v, branch=branch, month=mk, synced_at=now_iso, day_tot=day_m.get(mk, {}))
@@ -246,6 +263,42 @@ def main():
     for batch in S.chunks(person_batch, 200):
         S.sb_request(cfg, "POST", "/rest/v1/sopo_person_month?on_conflict=branch,slmcod,month",
                      batch, prefer="resolution=merge-duplicates,return=minimal")
+
+    # ---- รายวัน: sopo_branch_day / sopo_person_day ----
+    # เดือนเก่าไม่ขยับแล้ว รอบปกติจึง push แค่เดือนนี้+เดือนก่อน (delete ช่วงแล้ว insert
+    # ใหม่ = deterministic บิลที่โดนยกเลิกหายเองด้วย) ครั้งแรก/สั่ง --full ค่อยลงครบ 20 เดือน
+    marker = os.path.join(S.state_dir(), "sopo_day_full_%s.txt" % branch)
+    full = ("--full" in sys.argv) or not os.path.exists(marker)
+    prev = (today.replace(day=1) - datetime.timedelta(days=1))
+    recent = {month_key(today), month_key(prev)}
+    pick = (lambda d: True) if full else (lambda d: month_key(d) in recent)
+
+    day_batch = [dict(v, branch=branch, day=d.isoformat(), synced_at=now_iso)
+                 for d, v in branch_d.items() if pick(d)]
+    pday_batch = [dict(v, branch=branch, slmcod=sc, day=d.isoformat(), synced_at=now_iso)
+                  for (sc, d), v in person_d.items() if pick(d)]
+    days = sorted(x["day"] for x in day_batch)
+    if days:
+        rng = "day=gte.%s&day=lte.%s" % (days[0], days[-1])
+        try:
+            S.sb_request(cfg, "DELETE", "/rest/v1/sopo_branch_day?branch=eq.%s&%s" % (branch, rng))
+            for batch in S.chunks(day_batch, 300):
+                S.sb_request(cfg, "POST", "/rest/v1/sopo_branch_day?on_conflict=branch,day",
+                             batch, prefer="resolution=merge-duplicates,return=minimal")
+            S.sb_request(cfg, "DELETE", "/rest/v1/sopo_person_day?branch=eq.%s&%s" % (branch, rng))
+            for batch in S.chunks(pday_batch, 300):
+                S.sb_request(cfg, "POST", "/rest/v1/sopo_person_day?on_conflict=branch,slmcod,day",
+                             batch, prefer="resolution=merge-duplicates,return=minimal")
+            if full:
+                open(marker, "w").write(now_iso)
+            S.log("SOPO: day rows %d branch + %d person%s" %
+                  (len(day_batch), len(pday_batch), " (FULL)" if full else ""))
+        except RuntimeError as e:
+            # ตารางรายวันยังไม่ถูกสร้าง (ยังไม่รัน sql/sopo_daily.sql) — ข้ามส่วนนี้ไป
+            # รายเดือนที่ push ไปแล้วไม่กระทบ หน้าจอแค่ยังเลือกช่วงวันไม่ได้
+            if "sopo_branch_day" not in str(e) and "sopo_person_day" not in str(e):
+                raise
+            S.log("SOPO: ยังไม่มีตารางรายวัน -> ข้าม (รัน sopo-app/sql/sopo_daily.sql ก่อน)")
     S.log("SOPO: pushed OK")
 
 

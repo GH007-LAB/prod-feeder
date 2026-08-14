@@ -39,7 +39,25 @@ def _proxy_get(params, attempts=5, delay=3, timeout=60):
                 raise
             time.sleep(delay)
 
+# แคชไฟล์ที่ดึงผ่าน proxy ลงดิสก์ — รอบ feeder เดียวกันมีหลายสคริปต์อ่านไฟล์เดิมซ้ำ
+# (เช่น ARTRN: sopo_month + express_sync + verify = 3 รอบ/สาขา) ดึงจริงครั้งเดียวพอ
+# TTL 8 นาที < รอบ launchd 10 นาที ⇒ รอบใหม่ได้ไฟล์สดเสมอ แชร์กันเฉพาะในรอบเดียวกัน
+# (ตัวเลขทุกสคริปต์ในรอบจึงมาจาก snapshot เดียวกันด้วย — verify เทียบแล้วไม่เจอ noise
+# จากบิลที่ออกระหว่างสคริปต์แรกกับสคริปต์ท้าย) ปิดได้ด้วย DBF_CACHE_SEC=0
+DBF_CACHE_SEC = int(os.environ.get("DBF_CACHE_SEC") or "480")
+
 def _fetch_via_proxy(filename):
+    cache = None
+    if DBF_CACHE_SEC > 0:
+        cdir = os.path.join(state_dir(), "dbfcache")
+        os.makedirs(cdir, exist_ok=True)
+        cache = os.path.join(cdir, "%s_%s" % (PROXY.get("branch", "X"), filename))
+        try:
+            if time.time() - os.path.getmtime(cache) < DBF_CACHE_SEC:
+                with open(cache, "rb") as f:
+                    return f.read()
+        except OSError:
+            pass
     base_params = {"token": PROXY["token"], "branch": PROXY["branch"], "file": filename}
     meta = json.loads(_proxy_get(dict(base_params, action="meta")))
     size = meta["size"]
@@ -49,7 +67,13 @@ def _fetch_via_proxy(filename):
         b64 = _proxy_get(dict(base_params, offset=offset, length=PROXY_CHUNK))
         parts.append(base64.b64decode(b64))
         offset += PROXY_CHUNK
-    return b"".join(parts)
+    data = b"".join(parts)
+    if cache:
+        tmp = cache + ".tmp"  # เขียนลง tmp ก่อนแล้ว replace — กันสคริปต์อื่นอ่านไฟล์ครึ่งเดียว
+        with open(tmp, "wb") as f:
+            f.write(data)
+        os.replace(tmp, cache)
+    return data
 
 def _proxy_exists(filename):
     try:
