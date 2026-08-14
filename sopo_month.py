@@ -94,7 +94,8 @@ def main():
            "cycle_days_sum": 0.0, "cycle_days_n": 0, "cycle_le1_n": 0,
            "cust_new": 0, "cust_repeat": 0, "cust_total": 0,
            "gp_value": 0.0, "gp_base": 0.0,
-           "po_line_total": 0, "po_line_done": 0}
+           "po_line_total": 0, "po_line_done": 0,
+           "po_rr_days_sum": 0.0, "po_rr_days_n": 0}
     branch_m = {}  # month -> dict
     branch_d = {}  # date  -> dict (คอลัมน์ชุดเดียวกัน แค่ granularity = วัน)
     day_m = {}     # month -> {"วันที่": ยอดหน้าร้าน+ออนไลน์ของวันนั้น}
@@ -268,6 +269,24 @@ def main():
     risk = {}     # stkcod -> [qty30, val30, ชื่อ]
     rrp = {}      # (month, stkcod) -> [qty, amt]
     rr_name = {}
+    sale_bucket = {}  # หมวดสินค้า -> ยอดขาย 30 วัน (รวม ZZ — ใช้ทำ Turnover/DIO)
+
+    # หมวดสินค้า — ตาราง bucket() ของ build_buy.py ตรงตัว
+    _BUCKET = {"01": "01 แผ่น/ลอน/ผนัง", "02": "02 ครอบ/อุปกรณ์", "03": "03 ฉนวน/PU",
+               "04": "04 สกรู/น็อต", "05": "05 เหล็กรูปพรรณ", "06": "06 ไม้ฝา/ฝ้า",
+               "07": "07 สี/เบ็ดเตล็ด", "09": "09 PU Foam", "ZZ": "ZZ คอยล์ (วัตถุดิบ)"}
+    def bucket(stk):
+        return _BUCKET.get(stk[:2], "อื่นๆ")
+
+    # PO header (เลข -> เดือน/วันที่) — ใช้ทั้ง %รับของ, ราคาสั่งซื้อ และความเร็ว PO->RR
+    po_mk = {}
+    if S._file_exists(os.path.join(src, "POPR.DBF")):
+        for r in S.read_dbf(os.path.join(src, "POPR.DBF"), fields={"PONUM", "PODAT"}):
+            pod = r.get("PODAT")
+            if not pod or pod < cutoff:
+                continue
+            if month_key(pod) in keep_months:
+                po_mk[(r.get("PONUM") or "").strip()] = (month_key(pod), pod)
 
     # STCRD (stock ledger) รอบเดียว ใช้ 4 งาน — บรรทัดสินค้าของทุกเอกสารอยู่ที่นี่:
     #   IV/HS หน้าร้าน -> GP (scope เดียวกับ sales_tot ตาม _sbc_gp ของ legacy)
@@ -276,7 +295,7 @@ def main():
     #   RR -> ยอดรับซื้อเข้า (BUYVAL ของจอเดิม)
     for r in S.read_dbf(os.path.join(src, "STCRD.DBF"),
                         fields={"DOCNUM", "DOCDAT", "SLMCOD", "TRNQTY", "UNITPR",
-                                "TRNVAL", "XUNITPR", "STKCOD", "STKDES"}):
+                                "TRNVAL", "XUNITPR", "STKCOD", "STKDES", "RDOCNUM"}):
         doc = (r.get("DOCNUM") or "").strip()
         trnval = float(r.get("TRNVAL") or 0)
 
@@ -288,6 +307,16 @@ def main():
             if mk in keep_months:
                 bm(mk)["buy_tot"] += trnval
                 bd(dat)["buy_tot"] += trnval
+                # ความเร็วรับของ: RDOCNUM = "PO69xxxxx <บรรทัด>" -> วันจาก PO ถึงรับจริง
+                # (แกน "⚡ เร็วรับของ" ของเรดาร์ทีมจัดซื้อ — build_buy.py "PO->RR cycle")
+                rdoc = (r.get("RDOCNUM") or "").split()
+                hit = po_mk.get(rdoc[0]) if rdoc else None
+                if hit is not None:
+                    dd = (dat - hit[1]).days
+                    if dd >= 0:
+                        for b in (bm(mk), bd(dat)):
+                            b["po_rr_days_sum"] += dd
+                            b["po_rr_days_n"] += 1
             continue
 
         sr = sr_docs.get(doc)
@@ -323,13 +352,16 @@ def main():
         mk, dat, is_store = hit
 
         stk = (r.get("STKCOD") or "").strip().upper()
-        # อัตราขาย 30 วันล่าสุด (ทุกช่องทางที่ดึงสต็อกจริง) — ไม่รวมคอยล์วัตถุดิบ ZZ
-        if dat >= today30 and stk and not stk.startswith("ZZ"):
-            a = risk.setdefault(stk, [0.0, 0.0, ""])
-            a[0] += float(r.get("TRNQTY") or 0)
-            a[1] += trnval
-            if not a[2]:
-                a[2] = (r.get("STKDES") or "").strip()
+        if dat >= today30 and stk:
+            # Turnover/DIO ต่อหมวด นับทุกหมวดรวม ZZ
+            sale_bucket[bucket(stk)] = sale_bucket.get(bucket(stk), 0.0) + trnval
+            # อัตราขายรายตัว (เสี่ยงขาด) — ไม่รวมคอยล์วัตถุดิบ ZZ
+            if not stk.startswith("ZZ"):
+                a = risk.setdefault(stk, [0.0, 0.0, ""])
+                a[0] += float(r.get("TRNQTY") or 0)
+                a[1] += trnval
+                if not a[2]:
+                    a[2] = (r.get("STKDES") or "").strip()
         if stk.startswith("01"):
             lab = coil_label(r.get("STKDES"))
             if lab:
@@ -361,16 +393,25 @@ def main():
     # ---- สินค้าเสี่ยงขาด: คงเหลือ (STMAS) ÷ อัตราขาย/สัปดาห์ = สัปดาห์ที่ของพอ ----
     # เกณฑ์ธงตาม build_buy.py:64 (🔴 <2 · 🟡 <4) เก็บเฉพาะ <12 สัปดาห์ (actionable)
     onhand = {}
-    for r in S.read_dbf(os.path.join(src, "STMAS.DBF"), fields={"STKCOD", "TOTBAL", "STKDES"}):
-        onhand[(r.get("STKCOD") or "").strip().upper()] = (
-            float(r.get("TOTBAL") or 0), (r.get("STKDES") or "").strip())
+    stock_bucket = {}  # หมวด -> มูลค่าสต็อกคงเหลือ (ตัวหารของ Turnover)
+    for r in S.read_dbf(os.path.join(src, "STMAS.DBF"), fields={"STKCOD", "TOTBAL", "TOTVAL", "STKDES"}):
+        stk = (r.get("STKCOD") or "").strip().upper()
+        onhand[stk] = (float(r.get("TOTBAL") or 0), (r.get("STKDES") or "").strip())
+        tv = float(r.get("TOTVAL") or 0)
+        if stk and tv > 0:
+            stock_bucket[bucket(stk)] = stock_bucket.get(bucket(stk), 0.0) + tv
     risk_rows = []
+    risk_total = 0     # SKU ที่มีการขาย 30 วัน (ตัวหารแกน "กันของขาด")
+    risk_critical = 0  # ที่ธงแดง (<2 สัปดาห์)
     for stk, (q30, v30, nm) in risk.items():
         if q30 <= 0:
             continue
+        risk_total += 1
         oh, nm2 = onhand.get(stk, (0.0, ""))
         spw = q30 / 30.0 * 7.0
         wv = round(oh / spw, 1) if spw > 0 and oh >= 0 else None
+        if wv is not None and wv < 2:
+            risk_critical += 1
         if wv is None or wv >= 12:
             continue
         risk_rows.append({
@@ -380,19 +421,19 @@ def main():
             "flag": "🔴 เสี่ยงขาด" if wv < 2 else ("🟡 ใกล้หมด" if wv < 4 else "🟢 พอ"),
         })
 
+    # Turnover/DIO ต่อหมวด (BUYTOP.turnover ของจอเดิม) + ยอดรวมความเสี่ยงไว้คิดแกนเรดาร์
+    turnover_rows = [{
+        "branch": branch, "bucket": bk,
+        "stock_val": round(stock_bucket.get(bk, 0.0), 2),
+        "sale30_val": round(sale_bucket.get(bk, 0.0), 2),
+        "risk_total": risk_total, "risk_critical": risk_critical,
+    } for bk in sorted(set(stock_bucket) | set(sale_bucket))]
+
     # ---- %รับของ PO (ful ของจอเดิม): บรรทัด PO ที่รับครบแล้ว / บรรทัดทั้งหมดของเดือน ----
     # นับที่ระดับบรรทัด (POPRIT) ตาม POdone/POcnt ของ build_buy — REMQTY<=0 = รับครบ
     # ค่าเป็น "สถานะปัจจุบัน" ของ PO ที่ออกเดือนนั้น (รับของทีหลังตัวเลขเดือนเก่าขยับขึ้นได้
     # — ตรงกับ note จอเดิม "สถานะรับของทั้งเดือน")
-    if S._file_exists(os.path.join(src, "POPR.DBF")):
-        po_mk = {}  # PONUM -> (month, date)
-        for r in S.read_dbf(os.path.join(src, "POPR.DBF"), fields={"PONUM", "PODAT"}):
-            pod = r.get("PODAT")
-            if not pod or pod < cutoff:
-                continue
-            pmk = month_key(pod)
-            if pmk in keep_months:
-                po_mk[(r.get("PONUM") or "").strip()] = (pmk, pod)
+    if po_mk:
         for r in S.read_dbf(os.path.join(src, "POPRIT.DBF"),
                             fields={"PONUM", "REMQTY", "STKCOD", "STKDES", "ORDQTY", "TRNVAL"}):
             hit = po_mk.get((r.get("PONUM") or "").strip())
@@ -482,11 +523,16 @@ def main():
         for batch in S.chunks([dict(x, synced_at=now_iso) for x in price_rows], 200):
             S.sb_request(cfg, "POST", "/rest/v1/sopo_price_move?on_conflict=branch,stkcod",
                          batch, prefer="resolution=merge-duplicates,return=minimal")
-        S.log("SOPO: announce %d เสี่ยงขาด + %d ราคาซื้อ" % (len(risk_rows), len(price_rows)))
+        S.sb_request(cfg, "DELETE", "/rest/v1/sopo_turnover?branch=eq.%s" % branch)
+        S.sb_request(cfg, "POST", "/rest/v1/sopo_turnover?on_conflict=branch,bucket",
+                     [dict(x, synced_at=now_iso) for x in turnover_rows],
+                     prefer="resolution=merge-duplicates,return=minimal")
+        S.log("SOPO: announce %d เสี่ยงขาด + %d ราคาซื้อ + turnover %d หมวด"
+              % (len(risk_rows), len(price_rows), len(turnover_rows)))
     except RuntimeError as e:
-        if "sopo_stock_risk" not in str(e) and "sopo_price_move" not in str(e):
+        if not any(t in str(e) for t in ("sopo_stock_risk", "sopo_price_move", "sopo_turnover")):
             raise
-        S.log("SOPO: ยังไม่มีตาราง announce -> ข้าม (รัน sopo-app/sql/sopo_announce.sql ก่อน)")
+        S.log("SOPO: ยังไม่มีตาราง announce/turnover -> ข้าม (รัน SQL ใน sopo-app/sql ก่อน)")
 
     # ---- รายวัน: sopo_branch_day / sopo_person_day ----
     # เดือนเก่าไม่ขยับแล้ว รอบปกติจึง push แค่เดือนนี้+เดือนก่อน (delete ช่วงแล้ว insert

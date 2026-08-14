@@ -282,7 +282,7 @@ def main():
     # cust_repeat/cust_total ไม่อยู่ในลิสต์ — นิยามรายวัน (เทียบก่อนวันนั้น) รวมแล้วไม่เท่ารายเดือน
     DAY_COLS = ("sales_tot", "online_tot", "interbranch_tot", "ret_tot", "comm_tot", "plat_tot",
                 "buy_tot", "ai_tot", "bill_count", "cycle_le1_n", "cust_new", "gp_value", "gp_base",
-                "po_line_total", "po_line_done")
+                "po_line_total", "po_line_done", "po_rr_days_sum", "po_rr_days_n")
     try:
         drows = sb_get_all(cfg, "/rest/v1/sopo_branch_day?select=day,%s&branch=eq.%s&order=day"
                            % (",".join(DAY_COLS), branch))
