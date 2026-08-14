@@ -93,7 +93,8 @@ def main():
            "so_issued_value": 0.0, "open_value": 0.0, "open_count": 0,
            "cycle_days_sum": 0.0, "cycle_days_n": 0, "cycle_le1_n": 0,
            "cust_new": 0, "cust_repeat": 0, "cust_total": 0,
-           "gp_value": 0.0, "gp_base": 0.0}
+           "gp_value": 0.0, "gp_base": 0.0,
+           "po_line_total": 0, "po_line_done": 0}
     branch_m = {}  # month -> dict
     branch_d = {}  # date  -> dict (คอลัมน์ชุดเดียวกัน แค่ granularity = วัน)
     day_m = {}     # month -> {"วันที่": ยอดหน้าร้าน+ออนไลน์ของวันนั้น}
@@ -124,7 +125,7 @@ def main():
 
     _P0 = {"net_sales": 0.0, "bill_count": 0, "big_deal_value": 0.0, "big_deal_count": 0,
            "return_value": 0.0, "comm_value": 0.0, "comm_count": 0,
-           "so_value": 0.0, "gp_value": 0.0, "gp_base": 0.0}
+           "so_value": 0.0, "so_count": 0, "gp_value": 0.0, "gp_base": 0.0}
     # sale_docs: บิลขาย (หน้าร้าน+ออนไลน์ ไม่รวมระหว่างสาขา) -> (month, date, เป็นหน้าร้านไหม)
     #   หน้าร้านใช้จำกัด scope GP · ทั้งสองใช้ทำลิสต์ขายดี (legacy DET รวมออนไลน์ด้วย)
     # sr_docs: เอกสาร SR -> (month, date, slmcod, ชื่อลูกค้า upper) — แยกก้อนที่ระดับบรรทัดใน STCRD
@@ -341,6 +342,29 @@ def main():
                 p["gp_value"] += gpv
                 p["gp_base"] += trnval
 
+    # ---- %รับของ PO (ful ของจอเดิม): บรรทัด PO ที่รับครบแล้ว / บรรทัดทั้งหมดของเดือน ----
+    # นับที่ระดับบรรทัด (POPRIT) ตาม POdone/POcnt ของ build_buy — REMQTY<=0 = รับครบ
+    # ค่าเป็น "สถานะปัจจุบัน" ของ PO ที่ออกเดือนนั้น (รับของทีหลังตัวเลขเดือนเก่าขยับขึ้นได้
+    # — ตรงกับ note จอเดิม "สถานะรับของทั้งเดือน")
+    if S._file_exists(os.path.join(src, "POPR.DBF")):
+        po_mk = {}  # PONUM -> (month, date)
+        for r in S.read_dbf(os.path.join(src, "POPR.DBF"), fields={"PONUM", "PODAT"}):
+            pod = r.get("PODAT")
+            if not pod or pod < cutoff:
+                continue
+            pmk = month_key(pod)
+            if pmk in keep_months:
+                po_mk[(r.get("PONUM") or "").strip()] = (pmk, pod)
+        for r in S.read_dbf(os.path.join(src, "POPRIT.DBF"), fields={"PONUM", "REMQTY"}):
+            hit = po_mk.get((r.get("PONUM") or "").strip())
+            if hit is None:
+                continue
+            pmk, pod = hit
+            done = 1 if float(r.get("REMQTY") or 0) <= 0 else 0
+            for b in (bm(pmk), bd(pod)):
+                b["po_line_total"] += 1
+                b["po_line_done"] += done
+
     # so_value ต่อเซลล์ (lead-axis proxy แบบง่าย = มูลค่า SO ที่ SLMCOD คนนั้นออกเดือนนี้)
     for r in S.read_dbf(os.path.join(src, "OESO.DBF"), fields={"SODAT", "SLMCOD", "NETAMT"}):
         sod = r.get("SODAT")
@@ -352,8 +376,9 @@ def main():
         sc = (r.get("SLMCOD") or "").strip()
         if sc:
             v = float(r.get("NETAMT") or 0)
-            pm(sc, mk)["so_value"] += v
-            pd(sc, sod)["so_value"] += v
+            for p in (pm(sc, mk), pd(sc, sod)):
+                p["so_value"] += v
+                p["so_count"] += 1  # "หว่าน N ใบ" ของจดหมายโค้ช (leadcnt เดิม)
 
     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
     branch_batch = [dict(v, branch=branch, month=mk, synced_at=now_iso, day_tot=day_m.get(mk, {}),
