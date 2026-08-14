@@ -146,6 +146,7 @@ def main():
     cust_first = {}   # cuscod -> วันที่ซื้อหน้าร้านครั้งแรก (ทั้งประวัติ)
     cust_by_mk = {}   # month -> set(cuscod)
     cust_by_day = {}  # date  -> set(cuscod)
+    ai_out = 0.0      # มัดจำรับสะสมยังไม่หักบิล (aiOut) — นับทั้งประวัติ
 
     for r in S.read_dbf(os.path.join(src, "ARTRN.DBF"),
                         fields={"RECTYP", "DOCNUM", "DOCDAT", "SONUM", "SLMCOD", "CUSCOD",
@@ -164,6 +165,13 @@ def main():
         if seg == "regular" and not is_cash(cc, names.get(cc, "")):
             if cc not in cust_first or dat < cust_first[cc]:
                 cust_first[cc] = dat
+
+        # aiOut = มัดจำรับสะสมที่ยังไม่ถูกหักในบิล — ต้องนับทั้งประวัติ (ก่อนตัด window)
+        # aiOut ของจอเดิม: sum(AI) - sum(ADVAMT ที่หักในบิลขาย)
+        if rectyp == "0":
+            ai_out += float(r.get("NETAMT") or 0)
+        elif rectyp in ("1", "3"):
+            ai_out -= float(r.get("ADVAMT") or 0)
 
         if dat < cutoff:
             continue
@@ -526,6 +534,9 @@ def main():
         S.sb_request(cfg, "DELETE", "/rest/v1/sopo_turnover?branch=eq.%s" % branch)
         S.sb_request(cfg, "POST", "/rest/v1/sopo_turnover?on_conflict=branch,bucket",
                      [dict(x, synced_at=now_iso) for x in turnover_rows],
+                     prefer="resolution=merge-duplicates,return=minimal")
+        S.sb_request(cfg, "POST", "/rest/v1/sopo_branch_now?on_conflict=branch",
+                     [{"branch": branch, "ai_out": round(ai_out, 2), "synced_at": now_iso}],
                      prefer="resolution=merge-duplicates,return=minimal")
         S.log("SOPO: announce %d เสี่ยงขาด + %d ราคาซื้อ + turnover %d หมวด"
               % (len(risk_rows), len(price_rows), len(turnover_rows)))
