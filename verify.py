@@ -317,6 +317,34 @@ def main():
             chk("%s person รายวันรวม = รายเดือน (net_sales)" % mk, pdsum[mk]["net_sales"], p["net_sales"], MONEY_TOL)
             chk("%s person รายวันรวม = รายเดือน (gp_base)" % mk, pdsum[mk]["gp_base"], p["gp_base"], MONEY_TOL)
 
+    # 7) เซลล์ที่มียอดขายแต่ไม่มี mapping -> คะแนนพัฒนาการไม่เข้า HR Merit (hr_dev_score
+    # join ผ่าน sopo_slmcod_map) — กติกา "รับเซลล์ใหม่ต้องเติม mapping" คนลืมแน่ ให้เครื่องจำแทน
+    # เช็คเฉพาะ 3 เดือนล่าสุดกันฟ้องรหัสประวัติศาสตร์ · ต้องใช้ service key (ตาราง map ไม่เปิด anon)
+    if svc:
+        try:
+            smap_path = "/Users/cto007/sopo-app/lib/salesperson_map.json"
+            sales_ok = None
+            if os.path.exists(smap_path):
+                _m = json.load(open(smap_path, encoding="utf-8"))
+                sales_ok = {(b, c) for b, codes in _m.items() for c, info in codes.items()
+                            if isinstance(info, dict) and info.get("role") == "sales"}
+            mapped = {(r["branch"], r["slmcod"]) for r in sb_get(
+                cfg, "/rest/v1/sopo_slmcod_map?select=branch,slmcod", key=svc)}
+            recent3 = {"%04d-%02d" % ((today.year, today.month - i) if today.month - i >= 1
+                       else (today.year - 1, today.month - i + 12)) for i in range(3)}
+            missing = sorted({r["slmcod"] for r in prows
+                              if r["month"] in recent3 and float(r["net_sales"] or 0) > 0
+                              and (sales_ok is None or (branch, r["slmcod"]) in sales_ok)
+                              and (branch, r["slmcod"]) not in mapped})
+            if missing:
+                rep.note_fail("เซลล์ไม่มี mapping ใน sopo_slmcod_map (คะแนนไม่เข้า HR Merit)",
+                              "%s: %s — เติมแถวใน sopo_slmcod_map (ดู sopo-app/sql/hr_dev_score.sql)"
+                              % (branch, ", ".join(missing)))
+            else:
+                rep.n += 1
+        except Exception as e:
+            S.log("VERIFY: เช็ค mapping ไม่ได้ (%s) — ข้าม" % e)
+
     # express_sync ทำงานชั่วโมงละครั้ง จึงตามหลัง DBF ได้ตามปกติ — ฟ้องเฉพาะตอนที่เกินจริง
     # (บิลใน DB มากกว่าที่มีอยู่จริง) หรือขาดเกิน 10% (sync ค้าง/ไม่มี service key มานาน)
     # ตัดแถวที่ iv ไม่ขึ้นต้น IV/HS ออก — มีแถวปลอม 1 แถวจาก import เดิม (SKN iv='SO6904795'
