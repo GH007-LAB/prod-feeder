@@ -10,9 +10,9 @@
 ยังไม่ทำ commission/platform-fee sub-split ของ SR (รวมเป็น ret_tot เดียว), ไม่ทำ
 dedup lead-axis แบบ jaccard (ใช้ so_value ตรงๆ เป็นตัวแทนง่ายๆ) — ตามที่ตกลงไว้
 
-usage: python sopo_month.py <config_file> [--dry] [--full]
-   --full = push รายวันทั้ง 20 เดือน (ปกติรอบ 10 นาที push แค่เดือนนี้+เดือนก่อน
-   เพราะเดือนเก่าไม่ขยับแล้ว — ครั้งแรกที่ไม่มี state marker จะ full เองอัตโนมัติ)
+usage: python sopo_month.py <config_file> [--dry]
+   (รายวัน push ครบทุกเดือนทุกรอบ — เดือนเก่าขยับได้จริง เช่น รับของ PO ย้อนหลัง
+   หรือแก้เอกสารเก่าใน Express · --full เดิมจึงเลิกใช้ ทุกรอบ = full)
 """
 import sys, os, json, datetime, urllib.request, urllib.error, urllib.parse, re
 
@@ -545,20 +545,16 @@ def main():
             raise
         S.log("SOPO: ยังไม่มีตาราง announce/turnover -> ข้าม (รัน SQL ใน sopo-app/sql ก่อน)")
 
-    # ---- รายวัน: sopo_branch_day / sopo_person_day ----
-    # เดือนเก่าไม่ขยับแล้ว รอบปกติจึง push แค่เดือนนี้+เดือนก่อน (delete ช่วงแล้ว insert
-    # ใหม่ = deterministic บิลที่โดนยกเลิกหายเองด้วย) ครั้งแรก/สั่ง --full ค่อยลงครบ 20 เดือน
-    marker = os.path.join(S.state_dir(), "sopo_day_full_%s.txt" % branch)
-    full = ("--full" in sys.argv) or not os.path.exists(marker)
-    prev = (today.replace(day=1) - datetime.timedelta(days=1))
-    recent = {month_key(today), month_key(prev)}
-    pick = (lambda d: True) if full else (lambda d: month_key(d) in recent)
-
+    # ---- รายวัน: sopo_branch_day / sopo_person_day — ลงครบทุกเดือนทุกรอบ ----
+    # เดิม push แค่เดือนนี้+เดือนก่อนเพราะเชื่อว่า "เดือนเก่าไม่ขยับ" — พิสูจน์แล้วว่าผิด
+    # (19 ส.ค.: po_line_done ของ มิ.ย. ขยับเพราะรับของย้อนหลัง · gp_value ของ มี.ค.
+    # ขยับเพราะแก้เอกสารเก่าใน Express) เดือนเก่าขยับ -> แถวรายเดือนอัปเดตแต่รายวันค้าง
+    # -> ตัวเลขช่วงเวลาเพี้ยนเงียบ ๆ + verify ฟ้องทุกชั่วโมง — ลงครบถูกกว่า (~20 requests/สาขา)
     day_batch = [dict(v, branch=branch, day=d.isoformat(), synced_at=now_iso,
                       coil_top=coil_d.get(d, {}), coil_top2=coil2_d.get(d, {}))
-                 for d, v in branch_d.items() if pick(d)]
+                 for d, v in branch_d.items()]
     pday_batch = [dict(v, branch=branch, slmcod=sc, day=d.isoformat(), synced_at=now_iso)
-                  for (sc, d), v in person_d.items() if pick(d)]
+                  for (sc, d), v in person_d.items()]
     days = sorted(x["day"] for x in day_batch)
     if days:
         rng = "day=gte.%s&day=lte.%s" % (days[0], days[-1])
@@ -571,10 +567,7 @@ def main():
             for batch in S.chunks(pday_batch, 300):
                 S.sb_request(cfg, "POST", "/rest/v1/sopo_person_day?on_conflict=branch,slmcod,day",
                              batch, prefer="resolution=merge-duplicates,return=minimal")
-            if full:
-                open(marker, "w").write(now_iso)
-            S.log("SOPO: day rows %d branch + %d person%s" %
-                  (len(day_batch), len(pday_batch), " (FULL)" if full else ""))
+            S.log("SOPO: day rows %d branch + %d person" % (len(day_batch), len(pday_batch)))
         except RuntimeError as e:
             # ตารางรายวันยังไม่ถูกสร้าง (ยังไม่รัน sql/sopo_daily.sql) — ข้ามส่วนนี้ไป
             # รายเดือนที่ push ไปแล้วไม่กระทบ หน้าจอแค่ยังเลือกช่วงวันไม่ได้
