@@ -12,11 +12,14 @@ for b in SKN BK PPS; do
   cf="$STDIR/cfg_${b}.txt"
   if [ -n "$PROXY_URL" ]; then
     # Drive API ผ่าน Apps Script proxy — เลี่ยง local FileProvider mount ที่ launchd/cron อ่านไม่ได้
+    # SUPABASE_KEY ใน cfg = service role (20 ส.ค. 69 — audit ความปลอดภัย):
+    # เดิมใช้ anon key + policy เปิดเขียน anon บนตาราง sopo_* ทั้งชุด = ใครก็เขียน/ลบได้
+    # จากอินเทอร์เน็ต -> ถอน policy พวกนั้นทิ้งแล้ว feeder เขียนด้วย service role แทน
     printf 'BRANCH=%s\nPROXY_URL=%s\nPROXY_TOKEN=%s\nSUPABASE_URL=%s\nSUPABASE_KEY=%s\nWINDOW_DAYS=%s\n' \
-      "$b" "$PROXY_URL" "$PROXY_TOKEN" "$SUPABASE_URL" "$SUPABASE_KEY" "$WINDOW_DAYS" > "$cf"
+      "$b" "$PROXY_URL" "$PROXY_TOKEN" "$SUPABASE_URL" "$SUPABASE_SERVICE_KEY" "$WINDOW_DAYS" > "$cf"
   else
     printf 'BRANCH=%s\nSRC=%s/%s\nSUPABASE_URL=%s\nSUPABASE_KEY=%s\nWINDOW_DAYS=%s\n' \
-      "$b" "$DRIVE_ROOT" "$b" "$SUPABASE_URL" "$SUPABASE_KEY" "$WINDOW_DAYS" > "$cf"
+      "$b" "$DRIVE_ROOT" "$b" "$SUPABASE_URL" "$SUPABASE_SERVICE_KEY" "$WINDOW_DAYS" > "$cf"
   fi
   /usr/bin/python3 "$DIR/so_push.py" "$cf" >> "$LOG" 2>&1
   /usr/bin/python3 "$DIR/sopo_month.py" "$cf" >> "$LOG" 2>&1
