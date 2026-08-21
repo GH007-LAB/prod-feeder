@@ -53,4 +53,7 @@ SUPABASE_URL="$SUPABASE_URL" SUPABASE_ANON_KEY="$SUPABASE_ANON_KEY" \
   SUPABASE_SERVICE_KEY="$SUPABASE_SERVICE_KEY" SMOKE_EMAIL="$SMOKE_EMAIL" \
   SMOKE_PASSWORD="$SMOKE_PASSWORD" SMOKE_EVERY_MIN="$SMOKE_EVERY_MIN" \
   /usr/bin/python3 "$DIR/smoke_rls.py" >> "$LOG" 2>&1
+# สำรองไฟล์ Storage (รูปกิโล/หน้างาน/พนักงาน) ลงเครื่อง — วันละครั้ง (backup Supabase ไม่รวม Storage)
+SUPABASE_SERVICE_KEY="$SUPABASE_SERVICE_KEY" STORAGE_BACKUP_EVERY_MIN="$STORAGE_BACKUP_EVERY_MIN" \
+  /usr/bin/python3 "$DIR/storage_backup.py" >> "$LOG" 2>&1
 echo "$(date '+%Y-%m-%d %H:%M:%S') DONE" >> "$LOG"
