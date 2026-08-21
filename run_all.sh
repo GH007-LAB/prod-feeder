@@ -47,4 +47,10 @@ SUPABASE_SERVICE_KEY="$SUPABASE_SERVICE_KEY" ALOG_URL="$ALOG_URL" ALOG_EVERY_MIN
 # ชั่วโมงละครั้ง (QUESTS_EVERY_MIN) ต้องใช้ service key
 SUPABASE_SERVICE_KEY="$SUPABASE_SERVICE_KEY" QUESTS_EVERY_MIN="$QUESTS_EVERY_MIN" \
   /usr/bin/python3 "$DIR/quests_sync.py" "$cf" >> "$LOG" 2>&1
+# ตรวจสิทธิ์การเห็นข้อมูล (RLS) ด้วยตัวตน anon + auth-unlinked — ชั่วโมงละครั้ง
+# หลุดข้อไหนขึ้น SMOKE-FAIL (grep 'SMOKE-FAIL' ~/007so_push/feeder.log)
+SUPABASE_URL="$SUPABASE_URL" SUPABASE_ANON_KEY="$SUPABASE_ANON_KEY" \
+  SUPABASE_SERVICE_KEY="$SUPABASE_SERVICE_KEY" SMOKE_EMAIL="$SMOKE_EMAIL" \
+  SMOKE_PASSWORD="$SMOKE_PASSWORD" SMOKE_EVERY_MIN="$SMOKE_EVERY_MIN" \
+  /usr/bin/python3 "$DIR/smoke_rls.py" >> "$LOG" 2>&1
 echo "$(date '+%Y-%m-%d %H:%M:%S') DONE" >> "$LOG"
