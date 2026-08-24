@@ -286,7 +286,7 @@ def push_po(cfg, branch, src, now_iso, cutoff, dry):
     heads = {}
     for r in read_dbf(os.path.join(src, "POPR.DBF"),
                       fields={"PONUM", "PODAT", "SUPCOD", "NETAMT", "DOCSTAT", "CMPLDAT",
-                              "YOUREF", "DUEDAT"}):
+                              "YOUREF", "RCVDAT"}):
         pod = r.get("PODAT")
         if not pod or pod < cutoff:
             continue
@@ -301,8 +301,8 @@ def push_po(cfg, branch, src, now_iso, cutoff, dry):
             "docstat": (r.get("DOCSTAT") or "").strip(),
             "cmpldat": d2s(r.get("CMPLDAT")),
             "youref": (r.get("YOUREF") or "").strip(),
-            # นัดรับของ (จอ PO 4 ขั้นใช้โชว์ "นัดรับ dd/mm") — เพิ่ม 24 ส.ค. 69
-            "duedat": d2s(r.get("DUEDAT")),
+            # นัดรับของ = POPR.RCVDAT (จอ PO 4 ขั้นโชว์ "นัดรับ dd/mm") — เพิ่ม 24 ส.ค. 69
+            "duedat": d2s(r.get("RCVDAT")),
         }
 
     items = {}
