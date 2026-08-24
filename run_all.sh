@@ -57,4 +57,9 @@ SUPABASE_URL="$SUPABASE_URL" SUPABASE_ANON_KEY="$SUPABASE_ANON_KEY" \
 SUPABASE_URL="$SUPABASE_URL" SUPABASE_SERVICE_KEY="$SUPABASE_SERVICE_KEY" \
   STORAGE_BACKUP_EVERY_MIN="$STORAGE_BACKUP_EVERY_MIN" \
   /usr/bin/python3 "$DIR/storage_backup.py" >> "$LOG" 2>&1
+# แจ้งเตือนความผิดปกติเข้า LINE: สแกน log รอบนี้ + เรียก dispatcher บน hr-app
+# (VERIFY-FAIL / SMOKE-FAIL / backup พัง / ข้อมูลค้าง / ยอดเงินเข้าไม่ตรง)
+SUPABASE_URL="$SUPABASE_URL" SUPABASE_SERVICE_KEY="$SUPABASE_SERVICE_KEY" \
+  ALERTS_URL="$ALERTS_URL" \
+  /usr/bin/python3 "$DIR/alert_scan.py" >> "$LOG" 2>&1
 echo "$(date '+%Y-%m-%d %H:%M:%S') DONE" >> "$LOG"
