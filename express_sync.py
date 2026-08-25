@@ -113,7 +113,7 @@ def main():
     rows, cancelled = {}, []
     for r in S.read_dbf(os.path.join(src, "ARTRN.DBF"),
                         fields={"RECTYP", "DOCNUM", "DOCDAT", "SONUM", "CUSCOD",
-                                "NETAMT", "ADVAMT", "DOCSTAT"}):
+                                "NETAMT", "ADVAMT", "DOCSTAT", "RCVAMT", "REMAMT"}):
         if (r.get("RECTYP") or "").strip() not in SALE_RECTYP:
             continue
         doc = (r.get("DOCNUM") or "").strip()
@@ -137,6 +137,9 @@ def main():
             # (1,102 ใบจาก 29,724 = 20.2M) นิยามเดียวกับที่ SOPO ใช้ทั้งระบบ
             "amount": round(float(r.get("NETAMT") or 0) + float(r.get("ADVAMT") or 0), 2),
             "amount_source": "express",
+            # สถานะรับเงิน (badge 💰 บนบอร์ด pipeline): remamt <= 0 = รับเงินครบแล้ว
+            "rcvamt": round(float(r.get("RCVAMT") or 0), 2),
+            "remamt": round(float(r.get("REMAMT") or 0), 2),
         }
 
     # ---- เทียบกับรอบก่อน: ยิงเฉพาะใบใหม่/ใบที่ค่าเปลี่ยน ----
