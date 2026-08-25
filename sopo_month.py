@@ -436,7 +436,10 @@ def main():
         risk_total += 1
         oh, nm2 = onhand.get(stk, (0.0, ""))
         spw = q30 / 30.0 * 7.0
-        wv = round(oh / spw, 1) if spw > 0 and oh >= 0 else None
+        # A3 (ชีท F1_A3_URGENT ของ Purch): ยังขายอยู่แต่คงเหลือ <= 0 = ขาดสต็อกแล้ว สั่งด่วน
+        # (เดิม oh<0 ทำให้ wv=None แล้วถูกข้าม — ของที่ด่วนที่สุดหายจากตารางเสี่ยงขาด)
+        a3 = oh <= 0
+        wv = 0.0 if a3 else (round(oh / spw, 1) if spw > 0 else None)
         if wv is not None and wv < 2:
             risk_critical += 1
         if wv is None or wv >= 12:
@@ -445,7 +448,8 @@ def main():
             "branch": branch, "stkcod": stk, "stkdes": nm or nm2,
             "onhand": round(oh, 2), "sale30_qty": round(q30, 2), "sale30_val": round(v30, 2),
             "weeks_cover": wv,
-            "flag": "🔴 เสี่ยงขาด" if wv < 2 else ("🟡 ใกล้หมด" if wv < 4 else "🟢 พอ"),
+            "flag": "🚨 ขาดสต็อก (A3)" if a3
+                    else ("🔴 เสี่ยงขาด" if wv < 2 else ("🟡 ใกล้หมด" if wv < 4 else "🟢 พอ")),
         })
 
     # Turnover/DIO ต่อหมวด (BUYTOP.turnover ของจอเดิม) + ยอดรวมความเสี่ยงไว้คิดแกนเรดาร์
