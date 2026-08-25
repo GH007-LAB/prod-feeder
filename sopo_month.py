@@ -131,6 +131,11 @@ def main():
     #   หน้าร้านใช้จำกัด scope GP · ทั้งสองใช้ทำลิสต์ขายดี (legacy DET รวมออนไลน์ด้วย)
     # sr_docs: เอกสาร SR -> (month, date, slmcod, ชื่อลูกค้า upper) — แยกก้อนที่ระดับบรรทัดใน STCRD
     sale_docs, sr_docs = {}, {}
+    # จอเดิม reports: 💎 บิลปิดยอดเยี่ยม (GP% ต่อบิล) · 🪙 บิลขายคอยล์ · 🔥 สินค้าขายดีทุกหมวด
+    bill_info = {}   # doc -> [mk, slmcod, ชื่อลูกค้า, ยอดเต็ม]
+    bill_gp = {}     # doc -> [gp_value, gp_base]
+    bill_coil = set()  # บิลที่มีบรรทัดคอยล์ ZZ
+    prod_m = {}      # mk -> {stkcod: [qty, val, desc]}
     person_m = {}  # (slmcod, month) -> dict
     person_d = {}  # (slmcod, date)  -> dict
     def pm(sc, mk):
@@ -263,11 +268,6 @@ def main():
     _thick = re.compile(r"^0\.\d{2}$")
     CB2_PREFIX = ("01WP", "01WC", "01P3", "01P5")
     coil_m, coil2_m, coil_d, coil2_d = {}, {}, {}, {}
-    # จอเดิม reports: 💎 บิลปิดยอดเยี่ยม (GP% ต่อบิล) · 🪙 บิลขายคอยล์ · 🔥 สินค้าขายดีทุกหมวด
-    bill_info = {}   # doc -> [mk, slmcod, ชื่อลูกค้า, ยอดเต็ม]
-    bill_gp = {}     # doc -> [gp_value, gp_base]
-    bill_coil = set()  # บิลที่มีบรรทัดคอยล์ ZZ
-    prod_m = {}      # mk -> {stkcod: [qty, val, desc]}
     def coil_label(desc):
         toks = re.split(r"[\s\xa0]+", desc or "")
         for i, t in enumerate(toks):
