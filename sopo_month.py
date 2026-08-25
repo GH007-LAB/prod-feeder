@@ -204,6 +204,8 @@ def main():
                 dm = day_m.setdefault(mk, {})
                 dm[dk] = round(dm.get(dk, 0.0) + v, 2)
                 sale_docs[doc] = (mk, dat, seg == "regular")
+                # หัวบิล → ใช้ทำ "บิลปิดยอดเยี่ยม/บิลคอยล์" (จอเดิม reports 💎/🪙)
+                bill_info[doc] = [mk, sc, (names.get(cc, "") or cc or "")[:24], round(v, 2)]
                 if seg == "online":
                     for b in bb:
                         b["online_tot"] += v
@@ -261,6 +263,11 @@ def main():
     _thick = re.compile(r"^0\.\d{2}$")
     CB2_PREFIX = ("01WP", "01WC", "01P3", "01P5")
     coil_m, coil2_m, coil_d, coil2_d = {}, {}, {}, {}
+    # จอเดิม reports: 💎 บิลปิดยอดเยี่ยม (GP% ต่อบิล) · 🪙 บิลขายคอยล์ · 🔥 สินค้าขายดีทุกหมวด
+    bill_info = {}   # doc -> [mk, slmcod, ชื่อลูกค้า, ยอดเต็ม]
+    bill_gp = {}     # doc -> [gp_value, gp_base]
+    bill_coil = set()  # บิลที่มีบรรทัดคอยล์ ZZ
+    prod_m = {}      # mk -> {stkcod: [qty, val, desc]}
     def coil_label(desc):
         toks = re.split(r"[\s\xa0]+", desc or "")
         for i, t in enumerate(toks):
@@ -360,6 +367,14 @@ def main():
         mk, dat, is_store = hit
 
         stk = (r.get("STKCOD") or "").strip().upper()
+        # สินค้าขายดีทุกหมวด (จอเดิม 🔥 Top 5 + 🧱 PU Foam) — รายเดือน ตัด top ตอนเขียน
+        if stk and trnval > 0:
+            qd_ = prod_m.setdefault(mk, {})
+            a_ = qd_.setdefault(stk, [0.0, 0.0, (r.get("STKDES") or "").replace("\xa0", " ").strip()[:34]])
+            a_[0] += float(r.get("TRNQTY") or 0)
+            a_[1] += trnval
+        if stk.startswith("ZZ"):
+            bill_coil.add(doc)
         if dat >= today30 and stk:
             # Turnover/DIO ต่อหมวด นับทุกหมวดรวม ZZ
             sale_bucket[bucket(stk)] = sale_bucket.get(bucket(stk), 0.0) + trnval
@@ -379,14 +394,18 @@ def main():
                 qd = cd_.setdefault(dat, {})
                 qd[lab] = round(qd.get(lab, 0.0) + float(r.get("TRNQTY") or 0), 2)
 
-        if not is_store:
-            continue
         xunitpr = float(r.get("XUNITPR") or 0)
         if xunitpr <= 0:
             continue
         qty = float(r.get("TRNQTY") or 0)
         unitpr = float(r.get("UNITPR") or 0)
         gpv = qty * (unitpr - xunitpr)
+        # GP ระดับบิล (💎 กำไร% ต่อบิล) — นับทุกบิลขายรวมออนไลน์
+        bg = bill_gp.setdefault(doc, [0.0, 0.0])
+        bg[0] += gpv
+        bg[1] += trnval
+        if not is_store:
+            continue
         # ระดับสาขา: รวมทุกบรรทัด (บิลไม่มีรหัสเซลล์ก็นับ) — ตัวเลข "กำไรขั้นต้น" ของ KPI
         bm(mk)["gp_value"] += gpv
         bm(mk)["gp_base"] += trnval
@@ -493,9 +512,30 @@ def main():
                 p["so_value"] += v
                 p["so_count"] += 1  # "หว่าน N ใบ" ของจดหมายโค้ช (leadcnt เดิม)
 
+    # ---- blob รายเดือน: สินค้าขายดี (top 60 ตามมูลค่า) + บิลเด่น/บิลคอยล์ ----
+    def _top_products(mk):
+        items = prod_m.get(mk, {})
+        rows_ = sorted(items.items(), key=lambda kv: -kv[1][1])[:60]
+        return [[bucket(stk), a[2], round(a[0], 2), round(a[1])] for stk, a in rows_]
+
+    def _bills(mk, coil_only):
+        out = []
+        for doc, (bmk, sc, cust, val) in bill_info.items():
+            if bmk != mk:
+                continue
+            if coil_only and doc not in bill_coil:
+                continue
+            g = bill_gp.get(doc)
+            gp = round(g[0] / g[1] * 100, 1) if g and g[1] > 0 else None
+            out.append([doc, sc, cust, round(val), gp])
+        out.sort(key=lambda x: -x[3])
+        return out[:12 if not coil_only else 10]
+
     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
     branch_batch = [dict(v, branch=branch, month=mk, synced_at=now_iso, day_tot=day_m.get(mk, {}),
-                         coil_top=coil_m.get(mk, {}), coil_top2=coil2_m.get(mk, {}))
+                         coil_top=coil_m.get(mk, {}), coil_top2=coil2_m.get(mk, {}),
+                         top_products=_top_products(mk), top_bills=_bills(mk, False),
+                         coil_bills=_bills(mk, True))
                     for mk, v in branch_m.items()]
     person_batch = [dict(v, branch=branch, slmcod=sc, month=mk, synced_at=now_iso) for (sc, mk), v in person_m.items()]
 
