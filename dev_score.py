@@ -47,11 +47,19 @@ def dev_sales(sc, delta, cmean):
     return int(clamp(round(55 + 0.6 * (sc - cmean) + 0.7 * clamp(delta if delta is not None else 0, -10, 15)), 18, 95))
 
 
-def sb_get(cfg, path):
-    req = urllib.request.Request(cfg["SUPABASE_URL"].rstrip("/") + path, headers={
-        "apikey": cfg["SUPABASE_KEY"], "Authorization": "Bearer " + cfg["SUPABASE_KEY"]})
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        return json.loads(resp.read())
+def sb_get(cfg, path, page=1000):
+    """GET แบ่งหน้าด้วย Range — PostgREST ตัด 1,000 แถว/คำขอ (บทเรียน sopo_month 19 ก.ย. 69)"""
+    out, start = [], 0
+    while True:
+        req = urllib.request.Request(cfg["SUPABASE_URL"].rstrip("/") + path, headers={
+            "apikey": cfg["SUPABASE_KEY"], "Authorization": "Bearer " + cfg["SUPABASE_KEY"],
+            "Range-Unit": "items", "Range": "%d-%d" % (start, start + page - 1)})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            chunk = json.loads(resp.read())
+        out.extend(chunk)
+        if len(chunk) < page:
+            return out
+        start += page
 
 
 def main():

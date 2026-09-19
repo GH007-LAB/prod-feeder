@@ -95,8 +95,14 @@ def main():
         if not url:
             S.log("ALOG: ข้าม — ไม่มี ALOG_URL ใน feeder.env")
             return
-        with urllib.request.urlopen(url + ("&" if "?" in url else "?") + "log=1", timeout=60) as resp:
-            text = json.loads(resp.read())["csv"]
+        # Apps Script exec redirect ไป googleusercontent — บางรอบตอบ 404/5xx ชั่วคราว (เจอตั้งแต่ 19 ส.ค. 69)
+        # รอบถัดไปมักผ่าน จึงแค่ log บรรทัดเดียวแล้วออก ไม่พ่น traceback เต็มลง feeder.log
+        try:
+            with urllib.request.urlopen(url + ("&" if "?" in url else "?") + "log=1", timeout=60) as resp:
+                text = json.loads(resp.read())["csv"]
+        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, ValueError, KeyError) as e:
+            S.log("ALOG: ข้ามรอบนี้ — ดึงจาก Apps Script ไม่ได้ (%s)" % e)
+            return
         src = "apps-script"
 
     rows = rows_from_csv(text)
