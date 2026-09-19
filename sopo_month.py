@@ -59,14 +59,25 @@ def segment(cuscod, name):
     return "regular"
 
 
-def sb_get(cfg, path):
+def sb_get(cfg, path, page=1000):
+    """GET PostgREST แบบแบ่งหน้าด้วย Range header — PostgREST ตัดที่ 1,000 แถว/คำขอ
+    (19 ก.ย. 69: so_live มี 4,500+ แถว สาขาที่ SO เยอะถูกตัดจนเดือนล่าสุดหาย →
+    so_issued_value = 0 ทั้งเดือน, Funnel/%ปิดยอดผิด) — path ควรมี order= ให้หน้าเสถียร"""
     url = cfg["SUPABASE_URL"].rstrip("/") + path
-    req = urllib.request.Request(url, headers={
-        "apikey": cfg["SUPABASE_KEY"],
-        "Authorization": "Bearer " + cfg["SUPABASE_KEY"],
-    })
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        return json.loads(resp.read())
+    out, start = [], 0
+    while True:
+        req = urllib.request.Request(url, headers={
+            "apikey": cfg["SUPABASE_KEY"],
+            "Authorization": "Bearer " + cfg["SUPABASE_KEY"],
+            "Range-Unit": "items",
+            "Range": "%d-%d" % (start, start + page - 1),
+        })
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            chunk = json.loads(resp.read())
+        out.extend(chunk)
+        if len(chunk) < page:
+            return out
+        start += page
 
 
 def main():
@@ -84,7 +95,8 @@ def main():
     cutoff = today - datetime.timedelta(days=MONTHS_BACK * 31)
 
     # ---- so_live ของสาขานี้ (sync แล้วจาก so_push.py) — ใช้เป็นฝั่ง SO ทั้งหมด ----
-    so_rows = sb_get(cfg, "/rest/v1/so_live?branch=eq.%s&select=sonum,sodat,netamt,docstat" % branch)
+    so_rows = sb_get(cfg, "/rest/v1/so_live?branch=eq.%s&select=sonum,sodat,netamt,docstat"
+                          "&sodat=gte.%s&order=sonum" % (branch, cutoff.isoformat()))
     so_by_num = {r["sonum"]: r for r in so_rows if r.get("sonum")}
 
     _B0 = {"sales_tot": 0.0, "online_tot": 0.0, "interbranch_tot": 0.0,
