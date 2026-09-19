@@ -19,7 +19,7 @@ usage: SUPABASE_SERVICE_KEY=<key> python3 alog_sync.py <config_file> [--file pat
    ต้องใช้ service_role key (sopo_action ให้ authenticated insert ได้เฉพาะในนามตัวเอง
    แถว import ไม่มีตัวตน จึงต้องข้าม RLS) — ไม่มี key = ข้ามเงียบ ๆ
 """
-import sys, os, csv, io, json, time, hashlib, datetime, urllib.request
+import sys, os, csv, io, json, time, hashlib, datetime, urllib.request, urllib.error
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import so_push as S
