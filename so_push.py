@@ -274,10 +274,28 @@ def push_stock(cfg, branch, src, now_iso, dry):
     log("STOCK: pushed %d rows OK" % len(rows))
 
 # ---------- v3: จัดซื้อ (PO) — Phase 1b ของ SOPO Pipeline Kanban ----------
+def doc_open(r):
+    """เอกสารยัง "เปิดอยู่" ใน Express: ไม่ถูกยกเลิก (DOCSTAT C) และยังไม่ปิดงาน (CMPLDAT ว่าง)
+    ใช้ดึงใบค้างเก่าเข้าระบบด้วย — CTO 24 ก.ย. 69: SKN PO6900237 (4 เม.ย. 150,000 ยังไม่รับของ)
+    หายจากแอพเพราะเกินหน้าต่าง 45 วัน ทั้งที่ยังค้างจริง"""
+    return (r.get("DOCSTAT") or "").strip() != "C" and not r.get("CMPLDAT")
+
+
+def open_since(cfg):
+    """ใบเปิดค้างเก่าดึงย้อนถึงวันไหน — ค่าเริ่มต้น 1 ม.ค. ของปีนี้ (OPEN_SINCE=YYYY-MM-DD ใน cfg/env)
+    ทำไมต้องมีพื้น: Express มี PO สถานะเปิดที่ไม่เคยถูกปิดย้อนไปถึงปี 2013 ราว 1,850 ใบ/3 สาขา
+    (ส่วนใหญ่รับของจริงแล้วแต่ไม่กดปิด) ถ้าดึงหมดบอร์ด "ค้างรับ" จะจมของเก่าใช้งานไม่ได้"""
+    v = (os.environ.get("OPEN_SINCE") or cfg.get("OPEN_SINCE") or "").strip()
+    if v:
+        return datetime.date.fromisoformat(v)
+    return datetime.date(datetime.date.today().year, 1, 1)
+
+
 def push_po(cfg, branch, src, now_iso, cutoff, dry):
     if not _file_exists(os.path.join(src, "POPR.DBF")):
         log("PO: no POPR.DBF found in %s -> skip" % src)
         return
+    floor = open_since(cfg)
 
     names = {}
     for r in read_dbf(os.path.join(src, "APMAS.DBF"), fields={"SUPCOD", "PRENAM", "SUPNAM"}):
@@ -288,7 +306,8 @@ def push_po(cfg, branch, src, now_iso, cutoff, dry):
                       fields={"PONUM", "PODAT", "SUPCOD", "NETAMT", "DOCSTAT", "CMPLDAT",
                               "YOUREF", "RCVDAT"}):
         pod = r.get("PODAT")
-        if not pod or pod < cutoff:
+        # เอาเข้าเมื่อ: อยู่ในหน้าต่างวัน หรือ ยังเปิดอยู่และไม่เก่ากว่าพื้น OPEN_SINCE (ใบค้างต้องไม่หายจากสายตา)
+        if not pod or (pod < cutoff and not (doc_open(r) and pod >= floor)):
             continue
         po = (r.get("PONUM") or "").strip()
         if not po:
@@ -361,6 +380,7 @@ def push_ap(cfg, branch, src, now_iso, cutoff, dry):
     if not _file_exists(os.path.join(src, "APTRN.DBF")):
         log("AP: no APTRN.DBF found in %s -> skip" % src)
         return
+    floor = open_since(cfg)
 
     rows = {}
     for r in read_dbf(os.path.join(src, "APTRN.DBF"),
@@ -370,7 +390,9 @@ def push_ap(cfg, branch, src, now_iso, cutoff, dry):
         if not po:
             continue
         dat = r.get("DOCDAT")
-        if not dat or dat < cutoff:
+        # เอาเข้าเมื่อ: อยู่ในหน้าต่างวัน หรือ ยังเปิดอยู่/ค้างจ่าย (REMAMT > 0) และไม่เก่ากว่าพื้น OPEN_SINCE
+        still_open = doc_open(r) or float(r.get("REMAMT") or 0) > 0
+        if not dat or (dat < cutoff and not (still_open and dat >= floor)):
             continue
         doc = (r.get("DOCNUM") or "").strip()
         if not doc:
