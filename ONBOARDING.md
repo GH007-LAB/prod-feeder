@@ -89,3 +89,16 @@ seed `hr_holidays` (Pond ส่งรายการวันหยุด 2569) 
 - `so_live`/`coil_stock` = snapshot ค้าง จนกว่า feeder รัน (งาน A) → เช็ค `synced_at` ว่าสด ไม่ใช่แค่นับแถว
 - 2 Supabase: กลาง `syvfdbvmwaeyokytckwb` = ปลายทาง · `dbbhgacstsddonprgiuo` = production เก่า เก็บไว้ rollback **อย่าลบ**
 - **เครื่องเก่า (kritsada@) หยุดเขียน repo/Supabase แล้ว → เครื่อง CTO เป็นเจ้าของงานคนเดียว ไม่มีใครชน**
+
+## กติกา worktree (30 ก.ย. 2569 — กันสองเซสชันชนกัน)
+
+เหตุ: คืน 30 ก.ย. มีสองเซสชันแก้ `~/prod-feeder` พร้อมกัน งานของฝั่งหนึ่งถูกกวาดติดเข้า commit ของอีกฝั่ง
+
+- **`~/prod-feeder` = production checkout** — launchd (`com.007metals.prodfeeder`) รันจากที่นี่
+  **ห้ามแก้ไฟล์ตรงนี้** ใช้ `git pull --ff-only` / `git merge <branch>` รับของเข้าอย่างเดียว ต้องสะอาดเสมอ
+- **แก้โค้ดในเวิร์คทรีของตัวเอง**: `~/worktrees/prod-feeder-<ใคร>` (สร้างด้วย
+  `git worktree add ~/worktrees/prod-feeder-<ใคร> -b <ใคร>/work main`)
+  ที่มีอยู่แล้ว: `prod-feeder-cto` (branch `cto/work`)
+- จบงาน: commit ใน worktree → push branch หรือ merge เข้า main → `git -C ~/prod-feeder pull --ff-only`
+  (หรือ merge local) → ตรวจว่า launchd รอบถัดไปได้โค้ดใหม่
+- ก่อนเริ่มแก้ทุกครั้ง: `git -C ~/prod-feeder status -s` ต้องว่าง — ถ้าไม่ว่างแปลว่ามีคนผิดกติกา ให้เคลียร์ก่อน
