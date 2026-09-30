@@ -281,7 +281,7 @@ def main():
     # (30 ก.ย. 69) เดิมจับ token แรกที่หน้าตาเป็น 0.xx — แผ่นยาว 0.50 ม. เลยถูกนับเป็นความหนา
     #   ได้ป้าย "? 0.50 -3" ไร้ชื่อสี 158 รายการ · และ "0.30JJL" (หนาติดยี่ห้อ) ไม่ถูกจับเลย
     _thick = re.compile(r"^(0\.\d{2})([A-Za-z].*)?$")
-    _lenqty = re.compile(r"^(\d+(\.\d+)?(-\d+)?|-\d+)$")
+    _lenqty = re.compile(r"^(\d+(\.\d+)?-?(\d+)?|-\d+)$")  # รวม "7.77-" (ขีดท้ายแล้วเว้นวรรคก่อนจำนวน)
     CB2_PREFIX = ("01WP", "01WC", "01P3", "01P5")
     coil_m, coil2_m, coil_d, coil2_d = {}, {}, {}, {}
     def coil_label(desc):
@@ -315,6 +315,17 @@ def main():
                "07": "07 สี/เบ็ดเตล็ด", "09": "09 PU Foam", "ZZ": "ZZ คอยล์ (วัตถุดิบ)"}
     def bucket(stk):
         return _BUCKET.get(stk[:2], "อื่นๆ")
+
+    # (30 ก.ย. 69) หมวดรูปลอนของกลุ่ม 01 — CTO: "ลิสต์ขายดีต้องแยกลอนตรง/ผนัง/รั้ว เป็นคนละหมวดรูปลอน"
+    # ใช้ prefix 4 ตัวของ STKCOD (ยืนยันจาก STMAS 3 สาขา) แทนการเดาจากชื่อ — ใช้กับ top_products เท่านั้น
+    # ส่วน Turnover/DIO (sale_bucket/stock_bucket) คงหมวดใหญ่เดิมไว้ ไม่ให้แกนจอเดิมเพี้ยน
+    _PROFILE01 = {"01A-": "ลอนตรง", "01CU": "กันสาด", "01KL": "คลิปล็อค", "01MP": "กระถางเมทัลชีท",
+                  "01P3": "พาแนล3สันลอน", "01P5": "พาแนล5สันลอน", "01SL": "สแน็ปล็อค",
+                  "01WC": "ผนัง007", "01WP": "ลอนรั้ว", "01WR": "ลอนฝ้า"}
+    def prof_bucket(stk):
+        if stk.startswith("01"):
+            return "01 " + _PROFILE01.get(stk[:4], "แผ่น/ลอน อื่นๆ")
+        return bucket(stk)
 
     # PO header (เลข -> เดือน/วันที่) — ใช้ทั้ง %รับของ, ราคาสั่งซื้อ และความเร็ว PO->RR
     po_mk = {}
@@ -543,7 +554,7 @@ def main():
     def _top_products(mk):
         items = prod_m.get(mk, {})
         rows_ = sorted(items.items(), key=lambda kv: -kv[1][1])[:60]
-        return [[bucket(stk), a[2], round(a[0], 2), round(a[1])] for stk, a in rows_]
+        return [[prof_bucket(stk), a[2], round(a[0], 2), round(a[1])] for stk, a in rows_]
 
     def _bills(mk, coil_only):
         out = []
