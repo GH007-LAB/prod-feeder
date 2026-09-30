@@ -277,15 +277,23 @@ def main():
     # และ XUNITPR>0 เท่านั้น (สินค้าบางตัวไม่มีต้นทุนแยก เช่น อุปกรณ์เสริมที่รวมในแผ่นหลัก — ข้ามทั้ง 2 ฝั่ง กันดันมาร์จิ้นเพี้ยน)
     # month มาจาก store_docs ไม่ใช่ DOCDAT ของ STCRD — กัน GP ไปตกคนละเดือนกับยอดขายบิลเดียวกัน
     # ---- ลิสต์ขายดี: parse ความหนา 0.xx จากชื่อสินค้า (กติกาเดียวกับ legacy cb/cb2) ----
-    _thick = re.compile(r"^0\.\d{2}$")
+    # STKDES ใน STCRD = "ยาว -จำนวน ชื่อลอน สี หนา[ยี่ห้อ]" เช่น "2.10 -8 ลอนรั้ว ขาว 0.30 Diamond", "13.50-1 เรียบ ซิงค์ 0.20 Minsteel"
+    # (30 ก.ย. 69) เดิมจับ token แรกที่หน้าตาเป็น 0.xx — แผ่นยาว 0.50 ม. เลยถูกนับเป็นความหนา
+    #   ได้ป้าย "? 0.50 -3" ไร้ชื่อสี 158 รายการ · และ "0.30JJL" (หนาติดยี่ห้อ) ไม่ถูกจับเลย
+    _thick = re.compile(r"^(0\.\d{2})([A-Za-z].*)?$")
+    _lenqty = re.compile(r"^(\d+(\.\d+)?(-\d+)?|-\d+)$")
     CB2_PREFIX = ("01WP", "01WC", "01P3", "01P5")
     coil_m, coil2_m, coil_d, coil2_d = {}, {}, {}, {}
     def coil_label(desc):
-        toks = re.split(r"[\s\xa0]+", desc or "")
+        """-> "สี หนา ยี่ห้อ" (รูปแบบเดิมของจอ SOPO) หรือ None ถ้าไม่มีความหนาในชื่อ"""
+        toks = [t for t in re.split(r"[\s\xa0]+", desc or "") if t]
+        while toks and _lenqty.match(toks[0]):   # ตัด "ยาว -จำนวน" นำหน้าออกก่อน
+            toks.pop(0)
         for i, t in enumerate(toks):
-            if _thick.match(t):
-                return "%s %s %s" % (toks[i - 1] if i >= 1 else "?", t,
-                                     toks[i + 1] if i + 1 < len(toks) else "?")
+            m = _thick.match(t)
+            if m and i >= 1:
+                brand = m.group(2) or (toks[i + 1] if i + 1 < len(toks) else "")
+                return ("%s %s %s" % (toks[i - 1], m.group(1), brand)).strip()
         return None
 
     # สะสมไว้ทำ ANNOUNCE ของ Monday Brief (sopo-app/sql/sopo_announce.sql):
