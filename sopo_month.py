@@ -293,7 +293,10 @@ def main():
             m = _thick.match(t)
             if m and i >= 1:
                 brand = m.group(2) or (toks[i + 1] if i + 1 < len(toks) else "")
-                return ("%s %s %s" % (toks[i - 1], m.group(1), brand)).strip()
+                # (30 ก.ย. 69) ใส่ชื่อลอนนำหน้า (ตรง/เรียบ/ลอนรั้ว/ผนัง007/พาแนล3สันลอน/กันสาด...) ให้จอแยก
+                # หมวดรูปลอนได้ — CTO: "ต้องแยกลอน ตรง ผนัง รั้ว ออกจากกัน เป็นคนละหมวดรูปลอน"
+                prof = " ".join(toks[: i - 1])
+                return ("%s %s %s %s" % (prof, toks[i - 1], m.group(1), brand)).strip()
         return None
 
     # สะสมไว้ทำ ANNOUNCE ของ Monday Brief (sopo-app/sql/sopo_announce.sql):
