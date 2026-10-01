@@ -342,6 +342,16 @@ def main():
     #   IV/HS หน้าร้าน+ออนไลน์ -> ลิสต์ขายดีคอยล์ (legacy DET รวมออนไลน์)
     #   SR -> แยก คืนจริง/%ช่าง/แพลตฟอร์ม ที่ระดับบรรทัด (กติกา build_all.py:490-497)
     #   RR -> ยอดรับซื้อเข้า (BUYVAL ของจอเดิม)
+    # ต้นทุนเฉลี่ยปัจจุบันจาก STMAS (UNITPR = TOTVAL/TOTBAL ของ Express) — ใช้คิด GP แทน XUNITPR รายบรรทัด
+    # (1 ต.ค. 69 CTO: IV6903915 ขึ้น GP −43.9% ผิด — XUNITPR บางล็อตเพี้ยน เช่น แผ่น 0.35 เขียวสด 355 ฿/ม. ทั้งที่ขาย 253
+    #  และบรรทัดของแถม/PU ที่ bundle ในราคาแผ่น (UNITPR 0) ถูกนับต้นทุนโดยไม่มีรายได้ → ตัดบรรทัด UNITPR<=0 ออก
+    #  ตามจอเดิม (IV6903915 จาก −43.9% → ~21.5% ใกล้จอเดิม 23%))
+    avg_cost = {}
+    for r in S.read_dbf(os.path.join(src, "STMAS.DBF"), fields={"STKCOD", "UNITPR"}):
+        c = float(r.get("UNITPR") or 0)
+        if c > 0:
+            avg_cost[(r.get("STKCOD") or "").strip().upper()] = c
+
     for r in S.read_dbf(os.path.join(src, "STCRD.DBF"),
                         fields={"DOCNUM", "DOCDAT", "SLMCOD", "TRNQTY", "UNITPR",
                                 "TRNVAL", "XUNITPR", "STKCOD", "STKDES", "RDOCNUM"}):
@@ -428,12 +438,14 @@ def main():
                 qd = cd_.setdefault(dat, {})
                 qd[lab] = round(qd.get(lab, 0.0) + float(r.get("TRNQTY") or 0), 2)
 
-        xunitpr = float(r.get("XUNITPR") or 0)
-        if xunitpr <= 0:
-            continue
         qty = float(r.get("TRNQTY") or 0)
         unitpr = float(r.get("UNITPR") or 0)
-        gpv = qty * (unitpr - xunitpr)
+        if unitpr <= 0:
+            continue  # ของแถม/ส่วนประกอบที่ bundle ในราคาบรรทัดอื่น — ไม่มีรายได้ของตัวเอง ไม่นับทั้ง 2 ฝั่ง
+        cost = avg_cost.get(stk) or float(r.get("XUNITPR") or 0)  # STMAS avg ก่อน · ไม่มีค่อยถอยไป XUNITPR
+        if cost <= 0:
+            continue  # ไม่มีต้นทุนเลย ข้ามทั้ง 2 ฝั่ง กันมาร์จิ้นเพี้ยน
+        gpv = qty * (unitpr - cost)
         # GP ระดับบิล (💎 กำไร% ต่อบิล) — นับทุกบิลขายรวมออนไลน์
         bg = bill_gp.setdefault(doc, [0.0, 0.0])
         bg[0] += gpv
