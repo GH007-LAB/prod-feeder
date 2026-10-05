@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- ตัวอย่าง launchd ของ cash_poller (ยังไม่ติดตั้ง) — แบบเดียวกับ install.sh
+     ติดตั้ง: แทน __DIR__ = /Users/cto007/prod-feeder, __HOME__ = /Users/cto007 แล้ว
+       cp เป็น ~/Library/LaunchAgents/com.007metals.cashpoller.plist
+       launchctl load ~/Library/LaunchAgents/com.007metals.cashpoller.plist
+     ต้องมี ~/007so_push/cfg_{BK,SKN,PPS}.txt จาก run_all.sh ก่อน (poller อ่าน config จากตรงนั้น) -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.007metals.cashpoller</string>
+  <key>ProgramArguments</key><array><string>/usr/bin/python3</string><string>__DIR__/cash_poller.py</string></array>
+  <key>StartInterval</key><integer>60</integer>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>__HOME__/007so_push/feeder.log</string>
+  <key>StandardErrorPath</key><string>__HOME__/007so_push/cash_poller.err</string>
+</dict></plist>

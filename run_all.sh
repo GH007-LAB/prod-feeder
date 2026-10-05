@@ -3,6 +3,12 @@
 DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$DIR/feeder.env"
 STDIR="$HOME/007so_push"; mkdir -p "$STDIR"
+# cfg_*.txt มี service key (SUPABASE_KEY) — ต้องเป็น 600 เสมอ (security review L7)
+# สร้างไฟล์ว่างภายใต้ umask 077 ใน subshell (ไม่กระทบ umask ของสคริปต์ลูกอื่น) แล้ว chmod
+# ไฟล์ที่มีอยู่ — printf > ไฟล์เดิมคงสิทธิ์เดิม จึงได้ 600 ทุกรอบ (idempotent)
+# ผู้อ่านไฟล์เหล่านี้ (so_push ฯลฯ, cash_poller) รันด้วยผู้ใช้เดียวกัน อ่านได้ตามเดิม
+( umask 077; for f in "$STDIR"/cfg_{SKN,BK,PPS,finny}.txt; do [ -f "$f" ] || : > "$f"; done )
+chmod 600 "$STDIR"/cfg_*.txt 2>/dev/null
 LOG="$STDIR/feeder.log"
 echo "===== $(date '+%Y-%m-%d %H:%M:%S') START =====" >> "$LOG"
 if [ -z "$PROXY_URL" ] && [ ! -d "$DRIVE_ROOT" ]; then
@@ -48,6 +54,13 @@ for b in SKN BK PPS; do
   # ไม่ผ่านเมื่อไหร่ขึ้นบรรทัด VERIFY-FAIL: grep 'VERIFY-FAIL' ~/007so_push/feeder.log
   SUPABASE_SERVICE_KEY="$SUPABASE_SERVICE_KEY" VERIFY_EVERY_MIN="$VERIFY_EVERY_MIN" \
     /usr/bin/python3 "$DIR/verify.py" "$cf" >> "$LOG" 2>&1
+  # ปิดรอบ 007 (cash app): RE/AI 7 วันล่าสุด + IV ค้างรับ -> RPC cash_feed_* ทุกรอบ
+  # (ข้ามเองถ้า fingerprint ไม่เปลี่ยน) · เปิดด้วย CASH_ENABLED=1 ใน feeder.env หลังรัน
+  # ~/cash-app/sql/00*.sql บน Supabase แล้วเท่านั้น · ตัดรอบ/ส่งออกอยู่ที่ cash_poller.py (1 นาที)
+  if [ "$CASH_ENABLED" = "1" ]; then
+    SUPABASE_SERVICE_KEY="$SUPABASE_SERVICE_KEY" CASH_WINDOW_DAYS="$CASH_WINDOW_DAYS" \
+      /usr/bin/python3 "$DIR/cash_feed.py" "$cf" >> "$LOG" 2>&1
+  fi
 done
 # Finny (report_scores.csv) — ไฟล์เดียวใช้ร่วมทุกสาขา รันครั้งเดียวต่อรอบ
 # ต้องใช้ proxy เสมอ (fileId mode ไม่รองรับ local) — cfg สาขาตอนนี้อาจเป็น SRC local

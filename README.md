@@ -80,3 +80,11 @@ python3 express_sync.py ~/007so_push/cfg_BK.txt --dry            # ดูเฉ�
 - ความสด ~15 นาที (ตามรอบ 007DBFSync) · งานด่วน = ปุ่ม ⚡ ในแอพ (พิมพ์เลข SO เข้าตรง)
 - `SUPABASE_KEY` = anon key กลาง (public โดยดีไซน์ — ปลอดภัย, so_push ใช้ anon เท่านั้น ห้าม service_role)
 - ใช้ทางนี้แล้ว → ปิด task **007SoPush** บนเครื่องสาขา (กัน push ซ้ำ) แต่ **คง 007DBFSync ไว้** (คนป้อน DBF ขึ้น Drive)
+
+## ปิดรอบ 007 (cash app)
+- `cash_feed.py` — run_all เรียกทุกรอบเมื่อ `CASH_ENABLED=1`: RE/AI 7 วัน (`CASH_WINDOW_DAYS`) + IV ค้าง (REMAMT)
+  → RPC `cash_feed_docs` (ส่ง `p_window_from` + `p_dbf_mtime` ทุกครั้งที่ไฟล์ครบ) / `cash_feed_unpaid_iv`
+- `cash_poller.py` — launchd ทุก 1 นาที (`cash_poller.plist.example`): `cash_tick` → ตัดรอบ/ดึงบิลเพิ่ม → `cash_finalize_cut`
+  → `cash_export_out` → `AutoExport/sales_report/{BR}/{YYMMDD}_out.json` → `cash_mark_exported`
+- สัญญา API: `~/cash-app/sql/API_CONTRACT.md` · เทสต์: `/usr/bin/python3 -m unittest tests.test_cash_feed -v`
+- ความสดตอนตัดรอบขึ้นกับ task สาขา → ติดตั้ง **`007DBFSyncFast`** (ทุก 2 นาที 16:00–17:00) ตาม `CTO_SETUP.md`
