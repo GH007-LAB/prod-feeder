@@ -8,6 +8,7 @@
 <plist version="1.0"><dict>
   <key>Label</key><string>com.007metals.cashpoller</string>
   <key>ProgramArguments</key><array><string>/usr/bin/python3</string><string>__DIR__/cash_poller.py</string></array>
+  <key>EnvironmentVariables</key><dict><key>CASH_EXCEL_ENABLED</key><string>1</string></dict>
   <key>StartInterval</key><integer>60</integer>
   <key>RunAtLoad</key><true/>
   <key>StandardOutPath</key><string>__HOME__/007so_push/feeder.log</string>
