@@ -51,6 +51,8 @@ git clone https://github.com/GH007-LAB/prod-feeder.git ~/prod-feeder && cd ~/pro
 (ไม่แก้/ไม่ปิดตัวเดิม) · ต้นฉบับ task เดิม: `AutoExport/scripts/install_{BK,SKN,PPS}.bat` + `sync_{BR}.bat`
 (robocopy `*.DBF *.FPT` จาก `Z:\<br>2569` → `AutoExport\<BR>` แล้วเขียน `last_sync.txt`)
 
+**ทางลัด (แนะนำ):** ดับเบิลคลิกแบบ Run as administrator ที่ `AutoExport/scripts/install_fast_sync.bat` (คู่มือสำหรับสาขา: `branch_tools/คู่มือตั้ง_007DBFSyncFast.md`) — สคริปต์อ่าน action/ผู้รันจาก task เดิมให้เอง · ขั้นตอนมือด้านล่างใช้เมื่อสคริปต์ล้ม
+
 ทำที่เครื่องสาขาทีละเครื่อง — เปิด **Command Prompt แบบ Run as administrator**:
 1. ดู action/ผู้รันของตัวเดิมก่อน (ห้ามเดา path — แต่ละสาขาไม่เหมือนกัน):
    ```
