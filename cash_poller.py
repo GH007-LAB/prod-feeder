@@ -32,6 +32,7 @@ import sys, os, json, glob, time, fcntl, datetime
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import so_push as S
 import cash_feed as F
+import cash_excel_fill as XL
 
 BRANCHES = ("BK", "SKN", "PPS")
 DRIVE_GLOB = "ไดรฟ์ของฉัน (007skn0777@gmail.com)"
@@ -194,6 +195,12 @@ def run_once(cfgs=None, root=None):
             S.log("CASH_EXPORT: %s รอบ %s (%s) -> %s" %
                   (x["branch"], out["date"], x.get("status"), os.path.relpath(path, root)))
             summary["exported"].append(x["round_id"])
+            # เติมชีตคู่แฝด "<วัน>_auto" ใน Excel รายงานขาย (เปิดด้วย CASH_EXCEL_ENABLED=1)
+            # พังเองก็ไม่กระทบ export — fill_after_export กลืน exception แล้วลง ERROR: CASH_EXCEL
+            try:
+                XL.fill_after_export(x["branch"], out["date"], cfg_of(x["branch"]))
+            except Exception as e:
+                S.log("ERROR: CASH_EXCEL %s %s: %s" % (x["branch"], type(e).__name__, e))
         except Exception as e:
             S.log("ERROR: CASH_POLLER export รอบ %s ไม่สำเร็จ %s: %s" % (x["round_id"], type(e).__name__, e))
             summary["export_failed"].append(x["round_id"])
