@@ -5,6 +5,7 @@
 อ่าน ARTRN.DBF (+ ARMAS ชื่อลูกค้า, ARRCPIT ตรวจประกอบ) ของสาขาเดียว แล้วส่งผ่าน RPC
 ตาม ~/cash-app/sql/API_CONTRACT.md หัวข้อ Feeder — ห้าม PostgREST upsert ตรง:
   · cash_feed_docs(p_branch, p_docs, p_window_from, p_dbf_mtime) — RE/AI ทุกใบตั้งแต่ window_from
+    (+ iv_refs ต่อใบ RE จาก ARRCPIT — ใส่ช่องทางที่เลือกไว้ล่วงหน้าบน IV · 9 ต.ค. 69)
     + เวลาไฟล์ ARTRN บน Drive (→ cash_feed_status ให้หน้าแอปบอกความสดของข้อมูล)
   · cash_feed_unpaid_iv(p_branch, p_rows)             — IV ค้างรับทั้งชุด (แทนที่)
 
@@ -207,6 +208,20 @@ def collect(src, branch, today, window_days=WINDOW_DAYS_DEFAULT, with_unpaid=Tru
     need.discard("")
     names = load_names(src, branch, need) if need else {}
 
+    # 007 (CTO 9 ต.ค. 69): RE ปิด IV ใบไหนบ้าง — ARRCPIT: RCPNUM = เลข RE, DOCNUM = เลข IV (RECTYP 3)
+    # ส่งเป็น iv_refs ต่อใบ RE ให้ cash_feed_docs ใส่ช่องทางที่พนักงานเลือกไว้ล่วงหน้าบน IV
+    iv_by_re, has_re = {}, set()
+    rc = os.path.join(src, "ARRCPIT.DBF")
+    if S._file_exists(rc):
+        for r in S.read_dbf(rc, fields={"RCPNUM", "DOCNUM", "RECTYP"}):
+            re_no = (r.get("RCPNUM") or "").strip()
+            iv_no = (r.get("DOCNUM") or "").strip()
+            if not re_no or not iv_no:
+                continue
+            has_re.add(iv_no)
+            if (r.get("RECTYP") or "").strip() == IV_RECTYP and re_no.startswith("RE") and iv_no.startswith("IV"):
+                iv_by_re.setdefault(re_no, set()).add(iv_no)
+
     docs, seen = [], set()
     for t, doc, dat, r in sorted(raw_docs, key=lambda x: (x[2], x[1])):
         if doc in seen:          # DBF จริงไม่มีเลขซ้ำ แต่ RPC ปฏิเสธทั้งชุดถ้าซ้ำ — กันไว้
@@ -221,15 +236,11 @@ def collect(src, branch, today, window_days=WINDOW_DAYS_DEFAULT, with_unpaid=Tru
             "customer_name": names.get(cus) or None,
             "amount": round(float(r.get("NETAMT") or 0), 2),
             "docstat": (r.get("DOCSTAT") or "").strip(),
+            "iv_refs": sorted(iv_by_re.get(doc, ())),
         })
 
     unpaid, partial = None, 0
     if with_unpaid:
-        has_re = set()
-        rc = os.path.join(src, "ARRCPIT.DBF")
-        if S._file_exists(rc):
-            for r in S.read_dbf(rc, fields={"DOCNUM"}):
-                has_re.add((r.get("DOCNUM") or "").strip())
         unpaid = []
         for doc, dat, r in sorted(raw_iv, key=lambda x: (x[1], x[0])):
             if doc in has_re:
