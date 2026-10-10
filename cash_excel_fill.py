@@ -635,11 +635,26 @@ def apply_plan(wb, day, plan):
     return name, tpl, blocked
 
 
+def _branch_top(src_path):
+    """โฟลเดอร์บนสุดของสาขา (เช่น <Drive>/รายงานขายสาขาสกลนคร) · ไฟล์นอก Drive = โฟลเดอร์ของไฟล์เอง"""
+    s = os.path.realpath(src_path)
+    root = os.path.realpath(drive_root())
+    try:
+        rel = os.path.relpath(s, root)
+    except ValueError:
+        rel = os.pardir
+    if not rel.startswith(os.pardir) and os.sep in rel:
+        return os.path.join(root, rel.split(os.sep)[0])
+    return os.path.dirname(s)
+
+
 def _guard_out(src_path, out):
-    """ไฟล์ผลห้ามเป็นไฟล์สาขา และห้ามอยู่ในโฟลเดอร์ของไฟล์สาขา (แยกส่วนกันทำงาน — CTO 10 ต.ค. 69)"""
-    s, o = os.path.realpath(src_path), os.path.realpath(out)
-    if o == s or os.path.dirname(o) == os.path.dirname(s):
-        raise ValueError("ไฟล์ผลต้องอยู่นอกโฟลเดอร์รายงานขายของสาขา (%s)" % os.path.dirname(s))
+    """ไฟล์ผลห้ามอยู่ใต้โฟลเดอร์ของสาขา (รวมโฟลเดอร์ย่อย) — เทียบแบบไม่สนตัวพิมพ์ (APFS)
+    แยกส่วนกันทำงาน — CTO 10 ต.ค. 69"""
+    top = os.path.realpath(_branch_top(src_path)).casefold()
+    o = os.path.realpath(out).casefold()
+    if o == top or o.startswith(top.rstrip(os.sep) + os.sep):
+        raise ValueError("ไฟล์ผลต้องอยู่นอกโฟลเดอร์รายงานขายของสาขา (%s)" % _branch_top(src_path))
 
 
 def write_workbook(src_path, day, plan, out):

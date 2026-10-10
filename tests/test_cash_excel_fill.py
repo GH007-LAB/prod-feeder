@@ -220,6 +220,10 @@ class ExcelFillTest(unittest.TestCase):
             self._run(mock_detail(DAY), out=os.path.join(self.tmp, "x_auto.xlsx"))
         with self.assertRaises(ValueError):
             self._run(mock_detail(DAY), out=self.xl)
+        with self.assertRaises(ValueError):                         # โฟลเดอร์ย่อยของสาขา
+            self._run(mock_detail(DAY), out=os.path.join(self.tmp, "sub", "x_auto.xlsx"))
+        with self.assertRaises(ValueError):                         # ตัวพิมพ์ต่าง (APFS ไม่สนตัวพิมพ์)
+            self._run(mock_detail(DAY), out=os.path.join(self.tmp.upper(), "x_auto.xlsx"))
         self.assertEqual(os.listdir(self.tmp), [os.path.basename(self.xl)])
 
     def test_old_auto_sheets_in_branch_file_not_copied(self):
