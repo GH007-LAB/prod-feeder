@@ -2,10 +2,14 @@
 """
 007 Metals - เติม Excel "รายงานขายประจำวัน" อัตโนมัติจากแอปปิดรอบ 007 + Express
 
-เฟสนี้ (ทดลองคู่ขนาน): **ไม่แตะชีตของพนักงาน** — เขียนลง "ชีตคู่แฝด" ชื่อ "<วัน>_auto"
-(เช่น ชีต "6" → "6_auto") สร้างด้วย copy_worksheet ของชีตวันจริง (ไม่มีก็ชีตวันก่อนหน้าล่าสุด)
-แล้วล้างเฉพาะช่องค่าที่สคริปต์รับผิดชอบก่อนเติม · ช่องสูตรห้ามแตะ (ตรวจซ้ำทุกเซลล์ก่อนเขียน)
-รันซ้ำได้ (idempotent): ชีต _auto เดิมถูกลบแล้วสร้างใหม่
+แยกไฟล์ แยกส่วนกันทำงาน (CTO 10 ต.ค. 69 หลัง Finny พบว่าเดิม save ทับไฟล์รายงานขายของสาขา):
+  · ไฟล์รายงานขายของสาขา = **อ่านอย่างเดียว** — คัดลอกไปโฟลเดอร์ชั่วคราวในเครื่องแล้วอ่านจากสำเนา
+    ไม่เขียน/ไม่สำรอง/ไม่สร้างไฟล์ใด ๆ ในโฟลเดอร์ของสาขา (ห้ามเด็ดขาด — มีตัวกันในโค้ด)
+  · ผลของแอป = ไฟล์แยกต่อสาขาต่อวัน ที่ auto_out_path(): <ราก>/รายงานขาย_auto (แอปปิดรอบ 007)/<BR>/<YYYY-MM>/
+    <BR>_<YYYY-MM-DD>_auto.xlsx = สำเนาทั้งเล่ม (สูตรอ้างชีตอื่นยังทำงาน) + ชีต "<วัน>_auto" (แท็บสีส้ม)
+    ชีต _auto เก่าที่ค้างอยู่ในไฟล์สาขาถูกตัดออกจากสำเนา · รันซ้ำ = แทนที่ไฟล์ผลของวันนั้น
+  · ชีต "<วัน>_auto" สร้างด้วย copy_worksheet ของชีตวันจริง (ไม่มีก็ชีตวันก่อนหน้าล่าสุด)
+    แล้วล้างเฉพาะช่องค่าที่สคริปต์รับผิดชอบก่อนเติม · ช่องสูตรห้ามแตะ (ตรวจซ้ำทุกเซลล์ก่อนเขียน)
 
 แหล่งข้อมูล
   · Express DBF ของสาขา (cfg_{BR}.txt → SRC / PROXY_URL เหมือน cash_feed)
@@ -15,25 +19,22 @@
     + ตาราง employees (full_name ผู้ส่งรอบ) — ฟิลด์ qr / noncash_channel / traffic (sql/005)
     ยังไม่มีก็ทำงานได้: ไม่มี noncash_channel = ถือเป็นโอน (transfer) · ไม่มี traffic = เว้นว่าง
 
-ไฟล์เป้าหมาย (Drive Mirror ของ 007skn0777): ดู excel_path() · override โฟลเดอร์รากด้วย
+ไฟล์ต้นทาง (Drive Mirror ของ 007skn0777): ดู excel_path() · override โฟลเดอร์รากด้วย
 env CASH_EXCEL_ROOT=<โฟลเดอร์ "ไดรฟ์ของฉัน (...)"> หรือระบุไฟล์ตรง ๆ ด้วย --file
-
-การเขียนไฟล์จริง (--write):
-  ไฟล์ถูกเปิดค้าง (~$ lock ของ Excel) → ข้าม + log · สำรอง <file>.bak_YYMMDD_HHMM (เก็บ 7 ล่าสุด)
-  → โหลด → เติม → save ไฟล์ชั่วคราวในโฟลเดอร์เดียวกัน → ตรวจว่าไฟล์ต้นทางไม่ถูกแก้ระหว่างนั้น
-  → os.replace → เปิดอ่านซ้ำ ยืนยันจำนวนชีต + เซลล์ตัวอย่าง
-  --out <path> = เขียนผลลงสำเนาที่ path แทน (ไม่สำรอง ไม่แตะไฟล์ต้นทาง) ใช้ทดสอบ
+ไฟล์ผล: auto_out_path() · override รากด้วย env CASH_EXCEL_OUT_ROOT หรือระบุไฟล์ตรง ๆ ด้วย --out
+  (ห้ามเป็นไฟล์ต้นทาง และห้ามอยู่ในโฟลเดอร์เดียวกับไฟล์ต้นทาง)
 
 usage:
   python3 cash_excel_fill.py BR YYYY-MM-DD [--dry-run|--write] [--out path] [--file src.xlsx]
                              [--show]
-     ค่าเริ่ม = --dry-run (อ่าน + สรุป ไม่เขียนอะไร) · --show พิมพ์ทุกเซลล์ที่จะเติม (stdout)
+     ค่าเริ่ม = --dry-run (อ่าน + สรุป ไม่เขียนอะไร) · --write = เขียนไฟล์ผลแยกที่ auto_out_path()
+     --show พิมพ์ทุกเซลล์ที่จะเติม (stdout)
   cash_poller.py เรียก fill_after_export() หลัง cash_mark_exported เมื่อ CASH_EXCEL_ENABLED=1
 
 log: "CASH_EXCEL: ..." · "ERROR: CASH_EXCEL ..." เฉพาะพังจริง (alert_scan จับ)
 ไม่ลงชื่อลูกค้าใน log (PDPA) — log เฉพาะจำนวน/ยอดรวม
 """
-import sys, os, re, glob, time, json, shutil, datetime, urllib.request, urllib.error, urllib.parse
+import sys, os, re, glob, time, json, shutil, tempfile, datetime, urllib.request, urllib.error, urllib.parse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import so_push as S
@@ -47,7 +48,7 @@ except ImportError:  # pragma: no cover
 
 DRIVE_GLOB = "ไดรฟ์ของฉัน (007skn0777@gmail.com)"
 AUTO_SUFFIX = "_auto"
-BACKUP_KEEP = 7
+AUTO_DIRNAME = "รายงานขาย_auto (แอปปิดรอบ 007)"
 DEFAULT_FLOAT = 5000.0
 ONLINE_AREA = "เพจ007"          # ที่ SKN ใช้กับ Shopee/Lazada/TikTok (BK/PPS ยังไม่เจอตัวอย่าง)
 COMMENT_AUTHOR = "cash_excel_fill"
@@ -113,6 +114,13 @@ def excel_path(branch, day, root=None):
     return os.path.join(root or drive_root(), *rel)
 
 
+def auto_out_path(branch, day, root=None):
+    """ไฟล์ผลของแอป (แยกจากไฟล์สาขา) — 1 ไฟล์ต่อสาขาต่อวัน"""
+    base = root or os.environ.get("CASH_EXCEL_OUT_ROOT") or os.path.join(drive_root(), AUTO_DIRNAME)
+    return os.path.join(base, branch, day.strftime("%Y-%m"),
+                        "%s_%s%s.xlsx" % (branch, day.isoformat(), AUTO_SUFFIX))
+
+
 _DAY_RE = re.compile(r"^\s*(\d{1,2})\s*(\(?\s*หยุด\s*\)?)?\s*$")
 
 
@@ -139,15 +147,6 @@ def template_sheet(wb, day_no):
     if m:
         return m[min(m)], False
     return None, False
-
-
-def excel_locked(path):
-    """Excel/Numbers เปิดค้าง → มีไฟล์ ~$<ชื่อ> ข้าง ๆ (Drive Mirror ซิงก์มาด้วย)"""
-    d, b = os.path.split(path)
-    for cand in ("~$" + b, "~$" + b[2:], ".~lock.%s#" % b):
-        if os.path.exists(os.path.join(d, cand)):
-            return cand
-    return None
 
 
 # =====================================================================================
@@ -636,55 +635,53 @@ def apply_plan(wb, day, plan):
     return name, tpl, blocked
 
 
-def _rotate_backups(path):
-    baks = sorted(glob.glob(glob.escape(path) + ".bak_*"), key=os.path.getmtime)
-    for old in baks[:-BACKUP_KEEP]:
-        try:
-            os.remove(old)
-        except OSError:
-            pass
+def _guard_out(src_path, out):
+    """ไฟล์ผลห้ามเป็นไฟล์สาขา และห้ามอยู่ในโฟลเดอร์ของไฟล์สาขา (แยกส่วนกันทำงาน — CTO 10 ต.ค. 69)"""
+    s, o = os.path.realpath(src_path), os.path.realpath(out)
+    if o == s or os.path.dirname(o) == os.path.dirname(s):
+        raise ValueError("ไฟล์ผลต้องอยู่นอกโฟลเดอร์รายงานขายของสาขา (%s)" % os.path.dirname(s))
 
 
-def write_workbook(src_path, day, plan, out=None):
-    """โหลด → เติม → save (atomic) → ตรวจซ้ำ · คืน dict ผล · ไม่ได้เขียน = {'skipped': เหตุผล}"""
+def write_workbook(src_path, day, plan, out):
+    """อ่านไฟล์สาขาจากสำเนาชั่วคราว → เติมชีต _auto → save ไฟล์ผลแยก (atomic) → ตรวจซ้ำ
+    ไฟล์สาขาไม่ถูกเปิดเขียน ไม่ถูกสำรอง ไม่มีไฟล์ใหม่ในโฟลเดอร์ของสาขา · คืน dict ผล"""
+    if not out:
+        raise ValueError("ต้องระบุไฟล์ผล (out) — ห้ามเขียนลงไฟล์สาขา")
     if not os.path.exists(src_path):
         return {"skipped": "ไม่พบไฟล์ %s" % os.path.basename(src_path)}
-    lock = excel_locked(src_path)
-    if lock and not out:
-        return {"skipped": "ไฟล์ถูกเปิดค้าง (%s)" % lock}
+    _guard_out(src_path, out)
     mtime0 = os.path.getmtime(src_path)
-    backup = None
-    if not out:
-        backup = "%s.bak_%s" % (src_path, datetime.datetime.now(F.TH).strftime("%y%m%d_%H%M"))
-        shutil.copy2(src_path, backup)
-        _rotate_backups(src_path)
+    work = tempfile.mkdtemp(prefix="cashxl_")
     try:
-        wb = openpyxl.load_workbook(src_path)
-    except PermissionError as e:
-        return {"skipped": "เปิดไฟล์ไม่ได้ (%s)" % e}
-    name = "%d%s" % (day.day, AUTO_SUFFIX)
-    n_before = len(wb.sheetnames) - (1 if name in wb.sheetnames else 0)
-    sheet, tpl, blocked = apply_plan(wb, day, plan)
-
-    dest = out or src_path
-    d = os.path.dirname(os.path.abspath(dest))
-    tmp = os.path.join(d, ".%s.cashxl_tmp.xlsx" % os.path.basename(dest))
-    try:
-        wb.save(tmp)
-        if not out:
-            if os.path.getmtime(src_path) != mtime0 or excel_locked(src_path):
-                raise _Skip("ไฟล์ถูกแก้/เปิดระหว่างเติม — ยกเลิก ไม่เขียนทับ")
-        os.replace(tmp, dest)
-    except _Skip as e:
-        return {"skipped": str(e), "backup": backup}
-    except PermissionError as e:
-        return {"skipped": "เขียนไม่ได้ (%s)" % e, "backup": backup}
+        snap = os.path.join(work, "src.xlsx")
+        try:
+            shutil.copyfile(src_path, snap)          # อ่านไฟล์สาขาครั้งเดียว ไม่ถือ handle ค้าง
+        except PermissionError as e:
+            return {"skipped": "อ่านไฟล์สาขาไม่ได้ (%s)" % e}
+        wb = openpyxl.load_workbook(snap)
+        for nm in [n for n in wb.sheetnames if n.endswith(AUTO_SUFFIX)]:
+            del wb[nm]                               # ชีต _auto เก่าที่ค้างในไฟล์สาขา ไม่พาไปไฟล์ผล
+        n_before = len(wb.sheetnames)
+        sheet, tpl, blocked = apply_plan(wb, day, plan)
+        wb.active = wb.sheetnames.index(sheet)
+        outdir = os.path.dirname(os.path.abspath(out))
+        os.makedirs(outdir, exist_ok=True)
+        tmp = os.path.join(outdir, ".%s.cashxl_tmp.xlsx" % os.path.basename(out))
+        try:
+            wb.save(tmp)
+            os.replace(tmp, out)
+        except PermissionError as e:
+            return {"skipped": "เขียนไฟล์ผลไม่ได้ (%s)" % e}
+        finally:
+            if os.path.exists(tmp):
+                os.remove(tmp)
     finally:
-        if os.path.exists(tmp):
-            os.remove(tmp)
+        shutil.rmtree(work, ignore_errors=True)
+    if os.path.getmtime(src_path) != mtime0:
+        S.log("CASH_EXCEL: ไฟล์สาขาเปลี่ยนระหว่างอ่าน (สาขากำลังบันทึก) — ไฟล์ผลอาจไม่รวมการแก้ล่าสุด")
 
-    # ตรวจซ้ำ
-    chk = openpyxl.load_workbook(dest)
+    # ตรวจซ้ำ (ไฟล์ผลเท่านั้น)
+    chk = openpyxl.load_workbook(out)
     if len(chk.sheetnames) != n_before + 1 or sheet not in chk.sheetnames:
         raise RuntimeError("ตรวจซ้ำไม่ผ่าน: ชีต %d → %d" % (n_before, len(chk.sheetnames)))
     ws = chk[sheet]
@@ -699,8 +696,7 @@ def write_workbook(src_path, day, plan, out=None):
     for f in ("J3", "C124", "K130"):
         if not _is_formula(ws[f]):
             raise RuntimeError("ตรวจซ้ำไม่ผ่าน: สูตร %s หาย" % f)
-    return {"sheet": sheet, "template": tpl, "path": dest, "backup": backup, "blocked": blocked,
-            "sheets": len(chk.sheetnames)}
+    return {"sheet": sheet, "template": tpl, "path": out, "blocked": blocked, "sheets": len(chk.sheetnames)}
 
 
 class _Skip(Exception):
@@ -749,14 +745,15 @@ def run(branch, day, cfg, mode="dry", out=None, xlsx=None, show=False, detail=No
         S.log("CASH_EXCEL: %s (DRY) %.1f วิ" % (summary, time.time() - t0))
         res["plan"] = plan
         return res
-    w = write_workbook(path, day, plan, out=out)
+    out = out or auto_out_path(branch, day)
+    w = write_workbook(path, day, plan, out)
     res.update(w)
     res["plan"] = plan
     if w.get("skipped"):
         S.log("CASH_EXCEL: %s ข้าม — %s" % (summary, w["skipped"]))
     else:
-        S.log("CASH_EXCEL: %s -> ชีต %s (ต้นแบบ %s)%s %.1f วิ" % (
-            summary, w["sheet"], w["template"], " ลง %s" % out if out else "", time.time() - t0))
+        S.log("CASH_EXCEL: %s -> ไฟล์แยก %s ชีต %s (ต้นแบบ %s) %.1f วิ" % (
+            summary, os.path.basename(out), w["sheet"], w["template"], time.time() - t0))
         if w.get("blocked"):
             S.log("CASH_EXCEL: %s ไม่เขียนทับเซลล์สูตร/merge %s" % (branch, w["blocked"]))
     for n in plan.notes:
@@ -798,8 +795,11 @@ def main(argv=None):
     mode = "write" if "--write" in argv else "dry"
     if "--dry-run" in argv and "--write" in argv:
         raise SystemExit("เลือก --dry-run หรือ --write อย่างใดอย่างหนึ่ง")
-    if out and os.path.abspath(out) == os.path.abspath(xlsx or excel_path(branch, day)):
-        raise SystemExit("--out ต้องไม่ใช่ไฟล์ต้นทาง (ใช้ --write แทน)")
+    if out:
+        try:
+            _guard_out(xlsx or excel_path(branch, day), out)
+        except ValueError as e:
+            raise SystemExit(str(e))
     import cash_poller as CP
     cfg = CP.load_branch_cfg(branch)
     if openpyxl is None:

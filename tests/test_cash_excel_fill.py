@@ -110,11 +110,19 @@ class ExcelFillTest(unittest.TestCase):
         def no_net(*a, **k):
             raise AssertionError("เทสต์ห้ามเรียกเครือข่าย")
         F.RPC = no_net
+        self.outroot = tempfile.mkdtemp(prefix="cash_xl_out_")
+        self._env = os.environ.get("CASH_EXCEL_OUT_ROOT")
+        os.environ["CASH_EXCEL_OUT_ROOT"] = self.outroot
 
     def tearDown(self):
         X.employee_full_name = self._emp
         F.RPC = self._rpc
+        if self._env is None:
+            os.environ.pop("CASH_EXCEL_OUT_ROOT", None)
+        else:
+            os.environ["CASH_EXCEL_OUT_ROOT"] = self._env
         shutil.rmtree(self.tmp, ignore_errors=True)
+        shutil.rmtree(self.outroot, ignore_errors=True)
 
     def _run(self, detail, out=None, mode="write"):
         return X.run("SKN", DAY, self.cfg, mode=mode, out=out, xlsx=self.xl, detail=detail)
@@ -141,11 +149,11 @@ class ExcelFillTest(unittest.TestCase):
         self.assertGreater(res["cells"], 50)
 
     def test_out_copy_and_compare_sheet3(self):
-        out = os.path.join(self.tmp, "out.xlsx")
+        out = os.path.join(self.outroot, "out.xlsx")
         res = self._run(mock_detail(DAY), out=out)
         self.assertEqual(res["sheet"], "3_auto")
         self.assertEqual(res["template"], "3")
-        self.assertIsNone(res["backup"])
+        self.assertNotIn("backup", res)
         # ต้นทางไม่ถูกแตะ
         src = openpyxl.load_workbook(self.xl)
         self.assertNotIn("3_auto", src.sheetnames)
@@ -183,36 +191,59 @@ class ExcelFillTest(unittest.TestCase):
         self.assertEqual(auto["L5"].value, "KSME")
         self.assertEqual(auto["F1"].value, datetime.datetime(2026, 10, 3))
 
-    def test_write_in_place_backup_and_idempotent(self):
+    def _sha(self, path):
+        import hashlib
+        with open(path, "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()
+
+    def test_write_never_touches_branch_file(self):
+        """แยกไฟล์ แยกส่วนกันทำงาน (CTO 10 ต.ค. 69): ไฟล์สาขาเหมือนเดิมทุกไบต์ ไม่มีไฟล์ใหม่ในโฟลเดอร์สาขา"""
+        h0, m0 = self._sha(self.xl), os.path.getmtime(self.xl)
         n0 = len(openpyxl.load_workbook(self.xl).sheetnames)
         r1 = self._run(mock_detail(DAY))
-        self.assertTrue(r1["backup"] and os.path.exists(r1["backup"]))
-        r2 = self._run(mock_detail(DAY))             # รันซ้ำ = แทนที่ ไม่งอก
-        wb = openpyxl.load_workbook(self.xl)
+        self.assertEqual(self._sha(self.xl), h0)
+        self.assertEqual(os.path.getmtime(self.xl), m0)
+        self.assertEqual(os.listdir(self.tmp), [os.path.basename(self.xl)])
+        want = X.auto_out_path("SKN", DAY)
+        self.assertEqual(r1["path"], want)
+        self.assertTrue(want.startswith(self.outroot) and os.path.exists(want))
+        self.assertNotIn("backup", r1)
+        r2 = self._run(mock_detail(DAY))             # รันซ้ำ = แทนที่ไฟล์ผล ไม่งอกชีต
+        wb = openpyxl.load_workbook(want)
         self.assertEqual(len(wb.sheetnames), n0 + 1)
         self.assertEqual(r2["sheets"], n0 + 1)
-        self.assertFalse([f for f in os.listdir(self.tmp) if "cashxl_tmp" in f])
+        self.assertEqual(self._sha(self.xl), h0)
+        self.assertFalse([f for f in os.listdir(os.path.dirname(want)) if "cashxl_tmp" in f])
 
-    def test_backup_rotation(self):
-        for i in range(10):
-            p = "%s.bak_2610%02d_0000" % (self.xl, i)
-            open(p, "w").close()
-            os.utime(p, (1000 + i, 1000 + i))
-        self._run(mock_detail(DAY))
-        baks = [f for f in os.listdir(self.tmp) if ".bak_" in f]
-        self.assertEqual(len(baks), X.BACKUP_KEEP)
+    def test_out_inside_branch_folder_refused(self):
+        with self.assertRaises(ValueError):
+            self._run(mock_detail(DAY), out=os.path.join(self.tmp, "x_auto.xlsx"))
+        with self.assertRaises(ValueError):
+            self._run(mock_detail(DAY), out=self.xl)
+        self.assertEqual(os.listdir(self.tmp), [os.path.basename(self.xl)])
 
-    def test_locked_file_skipped(self):
-        open(os.path.join(self.tmp, "~$" + os.path.basename(self.xl)), "w").close()
-        before = os.path.getmtime(self.xl)
+    def test_old_auto_sheets_in_branch_file_not_copied(self):
+        wb = openpyxl.load_workbook(self.xl)
+        wb.copy_worksheet(wb[wb.sheetnames[0]]).title = "5_auto"   # จำลองชีตค้างจากเวอร์ชันเก่า
+        wb.save(self.xl)
+        h0 = self._sha(self.xl)
         res = self._run(mock_detail(DAY))
-        self.assertIn("เปิดค้าง", res["skipped"])
-        self.assertEqual(os.path.getmtime(self.xl), before)
+        names = openpyxl.load_workbook(res["path"]).sheetnames
+        self.assertNotIn("5_auto", names)
+        self.assertIn("%d_auto" % DAY.day, names)
+        self.assertEqual(self._sha(self.xl), h0)
+
+    def test_open_in_excel_still_reads(self):
+        open(os.path.join(self.tmp, "~$" + os.path.basename(self.xl)), "w").close()
+        h0 = self._sha(self.xl)
+        res = self._run(mock_detail(DAY))
+        self.assertTrue(os.path.exists(res["path"]))
+        self.assertEqual(self._sha(self.xl), h0)
 
     def test_without_sql005_and_without_channel(self):
         det = mock_detail(DAY, with_005=False)
         det["docs"] = [d for d in det["docs"] if d["doc_no"] != "RE0027119"]   # ยังไม่เลือก/ไม่อยู่ในแอป
-        out = os.path.join(self.tmp, "out.xlsx")
+        out = os.path.join(self.outroot, "out.xlsx")
         res = self._run(det, out=out)
         ws = openpyxl.load_workbook(out)["3_auto"]
         self.assertEqual(ws["H4"].value, 13071)          # qr ไม่มี → ลงโอน
@@ -224,7 +255,7 @@ class ExcelFillTest(unittest.TestCase):
         self.assertEqual(res["stats"]["no_channel"], 1)
 
     def test_no_round_express_only(self):
-        out = os.path.join(self.tmp, "out.xlsx")
+        out = os.path.join(self.outroot, "out.xlsx")
         res = self._run({"branch": "SKN", "date": DAY.isoformat(), "round": None}, out=out)
         ws = openpyxl.load_workbook(out)["3_auto"]
         self.assertEqual(ws["A3"].value, "IV6904069")
@@ -238,7 +269,7 @@ class ExcelFillTest(unittest.TestCase):
         for d in det["docs"]:
             if d["doc_no"] == "RE0027117":                # IV6904073 29,847
                 d.update(channel="mixed", cash_amount=10000, noncash_channel="qr")
-        out = os.path.join(self.tmp, "out.xlsx")
+        out = os.path.join(self.outroot, "out.xlsx")
         self._run(det, out=out)
         ws = openpyxl.load_workbook(out)["3_auto"]
         self.assertEqual(ws["F7"].value, 10000)
