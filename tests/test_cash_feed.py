@@ -21,7 +21,8 @@ import so_push as S      # noqa: E402
 import cash_feed as F    # noqa: E402
 import cash_poller as P  # noqa: E402
 
-DOC_KEYS = {"doc_no", "doc_type", "doc_date", "customer_code", "customer_name", "amount", "docstat"}
+DOC_KEYS = {"doc_no", "doc_type", "doc_date", "customer_code", "customer_name", "amount", "docstat",
+            "iv_refs"}  # RE→IV จาก ARRCPIT (9 ต.ค. 69)
 IV_KEYS = {"doc_no", "doc_date", "customer_code", "customer_name", "amount"}
 OUT_KEYS = {"branch", "date", "cutoff_at", "cutoff_by", "float", "submitted_at", "preparer", "docs",
             "expenses", "cash_counted", "summary", "doc_count_at_cutoff"}
