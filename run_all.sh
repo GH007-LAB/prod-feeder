@@ -69,10 +69,10 @@ cf_finny="$STDIR/cfg_finny.txt"
 printf 'BRANCH=SKN\nPROXY_URL=%s\nPROXY_TOKEN=%s\nSUPABASE_URL=%s\nSUPABASE_KEY=%s\n' \
   "$PROXY_URL" "$PROXY_TOKEN" "$SUPABASE_URL" "$SUPABASE_SERVICE_KEY" > "$cf_finny"
 /usr/bin/python3 "$DIR/finny_sync.py" "$cf_finny" >> "$LOG" 2>&1
-# action log จากจอ SOPO เดิม (Apps Script) -> sopo_action — ไฟล์เดียวรวมทุกสาขา
-# รันครั้งเดียวต่อรอบ ตัวสคริปต์คุมจังหวะเองชั่วโมงละครั้ง (ALOG_EVERY_MIN)
-SUPABASE_SERVICE_KEY="$SUPABASE_SERVICE_KEY" ALOG_URL="$ALOG_URL" ALOG_EVERY_MIN="$ALOG_EVERY_MIN" \
-  /usr/bin/python3 "$DIR/alog_sync.py" "$cf" >> "$LOG" 2>&1
+# action log จากจอ SOPO เดิม (Apps Script) -> sopo_action — ปิดแล้ว 16/10/2569 (CTO สั่งเก็บกวาด)
+# จอ SOPO Mobile เดิมปิดแล้ว (ALOG_URL ขึ้น 404 ทุกชั่วโมง) · เก็บ alog_sync.py ไว้อ้างอิง/นำเข้าไฟล์ CSV ย้อนหลังด้วยมือ
+# SUPABASE_SERVICE_KEY="$SUPABASE_SERVICE_KEY" ALOG_URL="$ALOG_URL" ALOG_EVERY_MIN="$ALOG_EVERY_MIN" \
+#   /usr/bin/python3 "$DIR/alog_sync.py" "$cf" >> "$LOG" 2>&1
 # คะแนนพัฒนาการรายเดือน -> sopo_dev_month (HR Merit อ่านผ่าน view hr_dev_score)
 # อ่านจาก Supabase ล้วน เร็วมาก รันทุกรอบได้
 /usr/bin/python3 "$DIR/dev_score.py" "$cf" >> "$LOG" 2>&1
