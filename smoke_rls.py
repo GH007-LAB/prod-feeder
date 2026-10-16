@@ -48,9 +48,9 @@ def throttle_ok():
     return True
 
 
-def req(method, path, token, body=None, key=None):
+def req(method, path, token, body=None, key=None, extra=None):
     """คืน (status, parsed_json_or_text) — ไม่ raise เพื่อให้ assert สถานะได้ตรง ๆ"""
-    headers = {"apikey": key or ANON, "Content-Type": "application/json"}
+    headers = {"apikey": key or ANON, "Content-Type": "application/json", **(extra or {})}
     if token:
         headers["Authorization"] = "Bearer " + token
     data = json.dumps(body).encode() if body is not None else None
@@ -149,6 +149,9 @@ def main():
     st, body = req("POST", "/rest/v1/rpc/join_work", None,
                    {"p_ticket": "00000000-0000-0000-0000-000000000000", "p_staff": {}})
     expect_no_privilege("anon เรียก join_work", st, body)
+    # authenticated_bind_employee 17 ต.ค. 69 ข้อ 1 — staff เคยให้ anon อ่านชื่อ/อีเมลได้ (column grant + policy public true)
+    st, body = req("GET", "/rest/v1/staff?select=id&limit=1", None)
+    expect_no_privilege("anon อ่าน staff", st, body)
 
     # ---------- ระดับ 2: ล็อกอินแล้วแต่ไม่ผูกทะเบียนพนักงาน ----------
     tok = ensure_bot()
@@ -164,6 +167,10 @@ def main():
         ("so_live?select=sonum&limit=1", "auth-unlinked อ่านรายการขาย so_live"),
         ("so_item_live?select=*&limit=1", "auth-unlinked อ่าน so_item_live"),
         ("production_ticket?select=id&limit=1", "auth-unlinked อ่านใบผลิต"),
+        # authenticated_bind_employee 17 ต.ค. 69 — เดิม policy using(true)
+        ("express_bill?select=id&limit=1", "auth-unlinked อ่านบิล Express"),
+        ("payouts?select=payout_id&limit=1", "auth-unlinked อ่านเงินเข้าร้าน payouts"),
+        ("app_access?select=employee_id&limit=1", "auth-unlinked อ่านว่าใครมีสิทธิ์แอปไหน"),
     ]:
         st, body = req("GET", "/rest/v1/" + t, tok)
         expect_rows(label, st, body)
@@ -173,6 +180,10 @@ def main():
     # ขาด branch (NOT NULL) — ถ้า policy ยังเปิดจะล้ม 23502 ไม่มีแถวหลุด · ปิดแล้วต้องได้ 42501 (RLS)
     st, body = req("POST", "/rest/v1/so_live", tok, {"sonum": "__SMOKE__"})
     expect_no_privilege("auth-unlinked เขียน so_live", st, body)
+    # fl_wo_upd ต้องผูก can_access('field') — wo_id ไม่มีจริง: แม้ policy เปิดก็ update 0 แถว ไม่แตะงานจริง
+    st, body = req("PATCH", "/rest/v1/fl_wo?wo_id=eq.00000000-0000-0000-0000-000000000000", tok,
+                   {"note": "__SMOKE__"}, extra={"Prefer": "return=representation"})
+    expect_rows("auth-unlinked แก้ใบงาน fl_wo", st, body)
     # ปลอมใบลา approved (C2) — ต้องถูกปฏิเสธ
     st, body = req("POST", "/rest/v1/hr_leave", tok,
                    {"employee_id": 1, "leave_type": "vacation", "date_from": "2099-01-01",
@@ -185,7 +196,7 @@ def main():
         for f in FAILS:
             log("SMOKE-FAIL: " + f)
         sys.exit(1)
-    log(f"SMOKE-OK: สิทธิ์ผ่านครบ (anon 19 ข้อ + auth-unlinked 13 ข้อ)")
+    log(f"SMOKE-OK: สิทธิ์ผ่านครบ (anon 20 ข้อ + auth-unlinked 17 ข้อ)")
 
 
 if __name__ == "__main__":
