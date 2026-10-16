@@ -136,7 +136,8 @@ def main():
                     "date_to": "2099-01-01", "days": 1, "status": "approved"})
     expect_denied("anon สร้างใบลา", st, body)
     # anon_write_lockdown 16 ต.ค. 69 — ตารางผลิต + sopo ที่เคยเปิดให้ anon
-    for t in ("so_live", "production_ticket", "finny_daily", "ap_live"):
+    for t in ("so_live", "production_ticket", "finny_daily", "ap_live",
+              "pipeline_so", "v_production_workers", "stock_current"):
         st, body = req("GET", "/rest/v1/" + t + "?select=*&limit=1", None)
         expect_rows("anon อ่าน " + t, st, body)
     # body ขาด branch (NOT NULL) — ถ้า anon ยังมีสิทธิ์ INSERT จะล้มที่ 23502 แทน 42501 → ไม่มีแถวหลุดเข้า DB
@@ -144,6 +145,10 @@ def main():
                    ("finny_daily", {"date": "2099-01-01"})):
         st, body = req("POST", "/rest/v1/" + t, None, row)
         expect_no_privilege("anon เขียน " + t, st, body)
+    # uuid ศูนย์ไม่มีจริง — ถ้ายังมีสิทธิ์ก็ update 0 แถว ไม่แตะใบผลิตจริง (ห้ามใช้ trigger_collector ทดสอบ — ยิง GitHub Actions จริง)
+    st, body = req("POST", "/rest/v1/rpc/join_work", None,
+                   {"p_ticket": "00000000-0000-0000-0000-000000000000", "p_staff": {}})
+    expect_no_privilege("anon เรียก join_work", st, body)
 
     # ---------- ระดับ 2: ล็อกอินแล้วแต่ไม่ผูกทะเบียนพนักงาน ----------
     tok = ensure_bot()
@@ -173,7 +178,7 @@ def main():
         for f in FAILS:
             log("SMOKE-FAIL: " + f)
         sys.exit(1)
-    log(f"SMOKE-OK: สิทธิ์ผ่านครบ (anon 15 ข้อ + auth-unlinked 9 ข้อ)")
+    log(f"SMOKE-OK: สิทธิ์ผ่านครบ (anon 19 ข้อ + auth-unlinked 9 ข้อ)")
 
 
 if __name__ == "__main__":
