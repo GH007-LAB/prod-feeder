@@ -78,7 +78,7 @@ python3 express_sync.py ~/007so_push/cfg_BK.txt --dry            # ดูเฉ�
 
 ## หมายเหตุ
 - ความสด ~15 นาที (ตามรอบ 007DBFSync) · งานด่วน = ปุ่ม ⚡ ในแอพ (พิมพ์เลข SO เข้าตรง)
-- `SUPABASE_KEY` = anon key กลาง (public โดยดีไซน์ — ปลอดภัย, so_push ใช้ anon เท่านั้น ห้าม service_role)
+- `SUPABASE_KEY` ใน feeder.env = anon key (ไม่มีสคริปต์ใช้แล้ว · smoke_rls ใช้ `SUPABASE_ANON_KEY`) · สคริปต์ feeder อ่าน key จาก `cfg_*.txt` ที่ `run_all.sh` ใส่ `SUPABASE_SERVICE_KEY` ให้ (ตั้งแต่ 20 ส.ค. 69) — ตารางผลิต/sopo ปิด anon เขียนแล้ว 16 ต.ค. 69 ห้ามย้อนไปใช้ anon
 - ใช้ทางนี้แล้ว → ปิด task **007SoPush** บนเครื่องสาขา (กัน push ซ้ำ) แต่ **คง 007DBFSync ไว้** (คนป้อน DBF ขึ้น Drive)
 
 ## ปิดรอบ 007 (cash app)

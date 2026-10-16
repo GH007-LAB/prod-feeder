@@ -11,7 +11,7 @@ config file (KEY=VALUE):
   BRANCH=SKN
   SRC=Z:\\skn2569
   SUPABASE_URL=https://xxxx.supabase.co
-  SUPABASE_KEY=eyJ...        (anon key เท่านั้น — ห้ามใช้ service_role)
+  SUPABASE_KEY=eyJ...        (service_role — run_all.sh ใส่ให้ใน cfg_*.txt · anon เขียนไม่ได้แล้วตั้งแต่ 16 ต.ค. 69)
   WINDOW_DAYS=45             (มองย้อน SO กี่วัน)
 
 state/log เก็บที่ %LOCALAPPDATA%\\007so_push\\ (ไม่ปนโฟลเดอร์ Drive)

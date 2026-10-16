@@ -103,6 +103,13 @@ def expect_denied(label, st, body):
         FAILS.append(f"{label}: ทำสำเร็จ (HTTP {st}) ทั้งที่ต้องถูกปฏิเสธ")
 
 
+def expect_no_privilege(label, st, body):
+    """คาดว่า 'ไม่มีสิทธิ์ระดับตาราง' (42501) — ล้มด้วยเหตุอื่น (เช่น 23502) แปลว่ายังมีสิทธิ์เขียน = FAIL"""
+    code = body.get("code") if isinstance(body, dict) else None
+    if 200 <= st < 300 or code != "42501":
+        FAILS.append(f"{label}: HTTP {st} code={code} (ต้องเป็น 42501 ไม่มีสิทธิ์)")
+
+
 def main():
     if not (URL and ANON and SERVICE and EMAIL and PASSWORD):
         log("SMOKE: ข้าม — env ไม่ครบ (ต้องมี SUPABASE_ANON_KEY/SMOKE_EMAIL/SMOKE_PASSWORD)")
@@ -128,6 +135,15 @@ def main():
                    {"employee_id": 1, "leave_type": "vacation", "date_from": "2099-01-01",
                     "date_to": "2099-01-01", "days": 1, "status": "approved"})
     expect_denied("anon สร้างใบลา", st, body)
+    # anon_write_lockdown 16 ต.ค. 69 — ตารางผลิต + sopo ที่เคยเปิดให้ anon
+    for t in ("so_live", "production_ticket", "finny_daily", "ap_live"):
+        st, body = req("GET", "/rest/v1/" + t + "?select=*&limit=1", None)
+        expect_rows("anon อ่าน " + t, st, body)
+    # body ขาด branch (NOT NULL) — ถ้า anon ยังมีสิทธิ์ INSERT จะล้มที่ 23502 แทน 42501 → ไม่มีแถวหลุดเข้า DB
+    for t, row in (("so_live", {"sonum": "__SMOKE__"}), ("po_live", {"ponum": "__SMOKE__"}),
+                   ("finny_daily", {"date": "2099-01-01"})):
+        st, body = req("POST", "/rest/v1/" + t, None, row)
+        expect_no_privilege("anon เขียน " + t, st, body)
 
     # ---------- ระดับ 2: ล็อกอินแล้วแต่ไม่ผูกทะเบียนพนักงาน ----------
     tok = ensure_bot()
@@ -157,7 +173,7 @@ def main():
         for f in FAILS:
             log("SMOKE-FAIL: " + f)
         sys.exit(1)
-    log(f"SMOKE-OK: สิทธิ์ผ่านครบ (anon 8 ข้อ + auth-unlinked 9 ข้อ)")
+    log(f"SMOKE-OK: สิทธิ์ผ่านครบ (anon 15 ข้อ + auth-unlinked 9 ข้อ)")
 
 
 if __name__ == "__main__":
