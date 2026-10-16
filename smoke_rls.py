@@ -160,12 +160,19 @@ def main():
         ("hr_discipline?select=id&limit=1", "auth-unlinked อ่านประวัติวินัย"),
         ("sopo_branch_month?select=branch&limit=1", "auth-unlinked อ่านยอดขาย SOPO"),
         ("hr_staff_ext?select=phone&limit=1", "auth-unlinked อ่านเบอร์โทร"),
+        # บัญชี LINE ทุกคนได้ authenticated — ตารางผลิตต้องผูกทะเบียน (anon_write_lockdown 16 ต.ค. 69)
+        ("so_live?select=sonum&limit=1", "auth-unlinked อ่านรายการขาย so_live"),
+        ("so_item_live?select=*&limit=1", "auth-unlinked อ่าน so_item_live"),
+        ("production_ticket?select=id&limit=1", "auth-unlinked อ่านใบผลิต"),
     ]:
         st, body = req("GET", "/rest/v1/" + t, tok)
         expect_rows(label, st, body)
     # คอลัมน์พิกัด GPS ต้องถูกปิดระดับคอลัมน์ (H4) — คาดว่า error ไม่ใช่ []
     st, body = req("GET", "/rest/v1/hr_timelog?select=lat,lng&limit=1", tok)
     expect_denied("auth-unlinked อ่านพิกัด GPS (คอลัมน์ต้องถูกปิด)", st, body)
+    # ขาด branch (NOT NULL) — ถ้า policy ยังเปิดจะล้ม 23502 ไม่มีแถวหลุด · ปิดแล้วต้องได้ 42501 (RLS)
+    st, body = req("POST", "/rest/v1/so_live", tok, {"sonum": "__SMOKE__"})
+    expect_no_privilege("auth-unlinked เขียน so_live", st, body)
     # ปลอมใบลา approved (C2) — ต้องถูกปฏิเสธ
     st, body = req("POST", "/rest/v1/hr_leave", tok,
                    {"employee_id": 1, "leave_type": "vacation", "date_from": "2099-01-01",
@@ -178,7 +185,7 @@ def main():
         for f in FAILS:
             log("SMOKE-FAIL: " + f)
         sys.exit(1)
-    log(f"SMOKE-OK: สิทธิ์ผ่านครบ (anon 19 ข้อ + auth-unlinked 9 ข้อ)")
+    log(f"SMOKE-OK: สิทธิ์ผ่านครบ (anon 19 ข้อ + auth-unlinked 13 ข้อ)")
 
 
 if __name__ == "__main__":
