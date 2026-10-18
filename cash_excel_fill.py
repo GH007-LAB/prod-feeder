@@ -239,10 +239,38 @@ def load_express(src, day, extra_re=()):
         for r in S.read_dbf(ist, fields={"TABTYP", "TYPCOD", "SHORTNAM", "TYPDES"}):
             if (r.get("TABTYP") or "").strip() == "40":
                 areas[(r.get("TYPCOD") or "").strip()] = F.norm(r.get("SHORTNAM") or r.get("TYPDES"))
+    # SR ที่เป็น %ช่าง/คอมแพลตฟอร์มทั้งใบ (บรรทัด STCRD) = ลดหนี้ ไม่ได้จ่ายเงินสดจากลิ้นชัก (CTO/Finny 18 ต.ค. 69)
+    #   นิยามเดียวกับ sopo_month.py (iscomm) · ใบคืนสินค้าปกติ = จ่ายคืนเงินสด
+    sr_comm = set()
+    sr_nos = {(r.get("DOCNUM") or "").strip() for r in srs}
+    stc = _find(src, "STCRD.DBF")
+    if sr_nos and S._file_exists(stc):
+        kinds = {}
+        for r in S.read_dbf(stc, fields={"DOCNUM", "STKCOD", "STKDES", "TRNVAL"}):
+            doc = (r.get("DOCNUM") or "").strip()
+            if doc not in sr_nos or _num(r.get("TRNVAL")) <= 0:
+                continue
+            kinds.setdefault(doc, set()).add(_is_comm_line(r))
+        sr_comm = {d for d, k in kinds.items() if k == {True}}
     key = lambda r: (r.get("DOCNUM") or "")
     return {"day": day, "ivs": sorted(ivs, key=key), "ais": sorted(ais, key=key),
             "srs": sorted(srs, key=key), "res": res, "lines": lines, "iv_index": iv_index,
-            "customers": customers, "areas": areas, "has_arrcpit": S._file_exists(rc)}
+            "customers": customers, "areas": areas, "has_arrcpit": S._file_exists(rc),
+            "sr_comm": sr_comm}
+
+
+def _youref_noncash(youref):
+    """YOUREF ของใบเสร็จใน Express บอกช่องทางโอน/QR (ใช้เดาเมื่อพนักงานยังไม่เลือกในแอป)"""
+    y = (youref or "").lower()
+    return any(k in y for k in ("kshop", "ksme", "qr", "โอน", "k shop", "scb"))
+
+
+def _is_comm_line(r):
+    """บรรทัด SR ที่เป็น %ช่าง/คอมมิชชั่น/คอมแพลตฟอร์ม — ตรงกับ sopo_month.py"""
+    code = (r.get("STKCOD") or "").strip().upper()
+    desc = (r.get("STKDES") or "").replace("\xa0", " ")
+    return (code.startswith(("07COMM", "07COMI")) or "เปอร์เซ็นต์ช่าง" in desc
+            or "ผู้รับเหมา" in desc or "คอมมิช" in desc)
 
 
 _AMPHOE = re.compile(r"(?:อ\.|อำเภอ)\s*([^\s\d]+)")
@@ -354,7 +382,7 @@ class Plan(object):
         self.comments[coord] = (self.comments[coord] + "\n" + text) if coord in self.comments else text
 
 
-def _alloc(lines, money):
+def _alloc(lines, money, fill_short=True):
     """แบ่งเงินของ RE ลงทีละรายการ (ตามลำดับ ARRCPIT) — เงินสดก่อน แล้วค่อยโอน/QR
     คืน [(line, cash, noncash, short)] · short = ส่วนที่ไม่มีเงินจริงรองรับ (RE หัก SR/AI ในตัว)"""
     cash, noncash = money[0], money[1]
@@ -366,7 +394,7 @@ def _alloc(lines, money):
         n = min(noncash, _num(need - c)) if need > 0 else 0.0
         noncash = _num(noncash - n)
         short = _num(need - c - n)
-        if short > 0.005:
+        if short > 0.005 and fill_short:
             # ใบเสร็จหัก SR/AI ในตัว: แบบที่พนักงานลง = IV เต็มยอดในช่องเดียวกับใบเสร็จ
             # แล้วแถว SR ลงช่องเดียวกัน (สูตร C113 หักคืน · เงินสดไม่เพี้ยนถ้า RE ไม่ใช่เงินสด)
             if money[1] > 0.005:
@@ -418,7 +446,12 @@ def build_plan(ex, detail, day, full_name=None):
             paid_rows.append((re_no, None, amt, m[0], m[1], m[2], 0.0, carried))
             P.notes.append("%s ไม่พบรายการใน ARRCPIT — ลงแถววางบิลด้วยเลข RE" % re_no)
             continue
-        alloc = _alloc(lines, money) if money else [(ln, None, None, 0.0) for ln in lines]
+        # ใบเสร็จโอน/QR ที่หัก "คืนสินค้า" ในตัว: ส่วนที่ขาด = ลดหนี้ → IV เหลือเชื่อ (G) ไม่เติมเป็นยอดโอน
+        #   (Excel BK 17/10 IV6905072: H 6,632.90 โอนจริง + G 6,154.40 = SR0005166) · %ช่าง ยังเติมตามเดิม
+        goods_sr = any(ln["rectyp"] == "5" and ln["doc_no"] not in (ex.get("sr_comm") or ())
+                       for ln in ex["lines"].get(re_no, []))
+        fill = not (money and money[1] > 0.005 and goods_sr)
+        alloc = _alloc(lines, money, fill) if money else [(ln, None, None, 0.0) for ln in lines]
         for ln in ex["lines"].get(re_no, []):
             if ln["rectyp"] == "5":      # SR ที่ถูกหักในใบเสร็จนี้ → ลงช่องเดียวกับใบเสร็จ
                 sr_col[ln["doc_no"]] = (None if not money else
@@ -507,13 +540,30 @@ def build_plan(ex, detail, day, full_name=None):
         m = _IV_RE.search(r.get("YOUREF") or "") or _IV_RE.search(r.get("SONUM") or "")
         if m:
             P.set("C%d" % row, m.group(0))
-        col, by_re = sr_col.get((r.get("DOCNUM") or "").strip(), ("F", None))
-        if col is None:
-            P.comment("F%d" % row, "%s: %s (หัก SR ใบนี้)" % (NOTE_NO_CHANNEL, by_re))
+        # 18 ต.ค. 69 — กติกาที่ตรงกับ Excel ที่ Finny แก้แล้ว (BK/PPS/SKN 16–17/10 · ทุกใบ SR):
+        #   %ช่าง/คอมฯ หักในใบเสร็จ   → F (จ่ายช่างเป็นเงินสดจากลิ้นชัก แม้ลูกค้าจ่ายโอน/QR)
+        #   %ช่าง/คอมฯ ไม่ได้หักในใบเสร็จ → G (ลดหนี้ ยังไม่จ่าย)
+        #   คืนสินค้า หักในใบเสร็จเงินสด → F · หักในใบเสร็จโอน/QR → G (ลูกค้าจ่ายสุทธิ ไม่มีเงินออก)
+        #   คืนสินค้า ไม่ได้หักในใบเสร็จ → F (จ่ายคืนเงินสด)
+        #   ช่องทางใบเสร็จ: ตามที่เลือกในแอป · ยังไม่เลือก = เดาจาก YOUREF ของ Express (KSME/KSHOP/QR = ไม่ใช่เงินสด)
+        sr_no = (r.get("DOCNUM") or "").strip()
+        # หาใบเสร็จที่หัก SR จาก ARRCPIT ตรง ๆ (sr_col ข้ามใบเสร็จยอด ≤ 0 เช่น RE จ่ายค่า%ช่าง −200)
+        by_re = sr_col.get(sr_no, (None, None))[1] or next(
+            (rn for rn, ls in sorted(ex["lines"].items()) for ln in ls
+             if ln["rectyp"] == "5" and ln["doc_no"] == sr_no), None)
+        comm = sr_no in (ex.get("sr_comm") or ())
+        if by_re:
+            if comm:
+                col = "F"
+            else:
+                m = re_money(by_re)
+                cash_re = (m[1] <= 0.005) if m else not _youref_noncash((ex["res"].get(by_re) or {}).get("YOUREF"))
+                col = "F" if cash_re else "G"
         else:
-            P.set("%s%d" % (col, row), _num(r.get("NETAMT")))
-            if by_re:
-                P.comment("A%d" % row, "หักในใบเสร็จ %s" % by_re)
+            col = "G" if comm else "F"
+        P.set("%s%d" % (col, row), _num(r.get("NETAMT")))
+        P.comment("A%d" % row, ("%ช่าง/คอมฯ" if comm else "คืนสินค้า") + (" หักในใบเสร็จ %s" % by_re if by_re else "")
+                  + (" — จ่ายเงินสด" if col == "F" else " — ลดหนี้ ไม่จ่ายเงินสด"))
 
     # ---- แถว 90–109: วางบิลชำระแล้ว (RE วันนี้ที่ชำระ IV วันก่อน + RE ยกมา) ----
     if len(paid_rows) > len(PAID_ROWS):

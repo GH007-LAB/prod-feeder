@@ -33,6 +33,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import so_push as S
 import cash_feed as F
 import cash_excel_fill as XL
+import cash_report as RP
 
 BRANCHES = ("BK", "SKN", "PPS")
 DRIVE_GLOB = "ไดรฟ์ของฉัน (007skn0777@gmail.com)"
@@ -213,6 +214,22 @@ def run_once(cfgs=None, root=None):
             # ไม่ใช้คำ ERROR — นี่คือเหตุการณ์ธุรกิจ ไม่ใช่ระบบพัง (กัน alert_scan ส่งหาปอนด์)
             S.log("CASH-LATE: %s รอบ %s เลยเส้นตายยังไม่ส่ง — ล็อกแล้ว" % (names.get(rid, "?"), rid))
         summary["late"] = late
+
+    # ---- 4b) สรุปยอดขายประจำวัน (C113–C122 ตาม Excel) ให้หน้าปิดรอบ — คำนวณใหม่เฉพาะเมื่อข้อมูลเปลี่ยน ----
+    #   วันนี้ทุกรอบ + เมื่อวาน (รอบที่ปลดล็อก/ส่งย้อนหลัง) · RPC cash_feed_report ยังไม่มี (ยังไม่รัน sql/015) = ข้ามเงียบ
+    #   พังเองไม่กระทบตัดรอบ/ส่งออก (ทำหลังสุดก่อน purge)
+    if os.environ.get("CASH_REPORT_DISABLED") != "1":
+        today = datetime.datetime.now(F.TH).date()
+        try:
+            res = RP.push_due(cfg_of, BRANCHES, [today - datetime.timedelta(days=1), today])
+            pushed = ["%s %s" % (b, d) for b, d, s in res if s == "pushed"]
+            if pushed:
+                S.log("CASH_REPORT: สรุปยอดขายประจำวัน %s" % ", ".join(pushed))
+            summary["report"] = {s: sum(1 for x in res if x[2] == s) for s in ("pushed", "same", "error")}
+        except F.RpcMissing:
+            summary["report"] = "rpc-missing"
+        except Exception as e:
+            S.log("ERROR: CASH_REPORT %s: %s" % (type(e).__name__, e))
 
     # ---- 5) PDPA: ล้างชื่อลูกค้าเก่าเดือนละครั้ง (ทำท้ายสุด ไม่หน่วงการตัดรอบ) ----
     purged = maybe_purge(any_cfg)

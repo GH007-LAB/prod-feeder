@@ -110,6 +110,12 @@ class CashFeedTest(unittest.TestCase):
             os.remove(os.path.join(S.state_dir(), f))
         S.PROXY.clear()
         F.clear_cache()
+        # สรุปยอดขายประจำวัน (cash_report) มีเทสต์ของตัวเองใน test_cash_report.py — ปิดในเทสต์ poller
+        # ที่ตรวจลำดับ RPC ทุกตัว
+        os.environ["CASH_REPORT_DISABLED"] = "1"
+
+    def tearDown(self):
+        os.environ.pop("CASH_REPORT_DISABLED", None)
 
     # ---------- ตัวเลขของวันที่ 2026-10-02 (นับมือจาก DBF ตอนสำรวจ) ----------
     def test_counts_2026_10_02(self):
