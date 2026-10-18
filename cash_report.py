@@ -26,7 +26,7 @@ import so_push as S
 import cash_feed as F
 import cash_excel_fill as XL
 
-VERSION = 3
+VERSION = 4
 
 # ฟอร์ม Excel มีแถวจำกัด (IV 60 · AI 8 · SR 7 · วางบิล 20 · ค่าใช้จ่าย 16) — build_plan ตัดท้ายเมื่อเกิน
 # สรุปรายวันต้องรวมครบทุกใบ (SKN 14/10: SR 11 ใบ วางบิล 40 รายการ) จึงคำนวณด้วยช่วงแถวเสมือนที่ไม่ชนกัน
@@ -136,6 +136,11 @@ def _round_scope(ex, detail, src):
     # ใบเสร็จยอด ≤ 0 ของวัน (จ่ายค่า%ช่าง/คืนเงินสด เช่น SKN 13/10 RE0027211 −15,344) ไม่เข้ารอบในแอปอยู่แล้ว
     #   (sql/009 รับเฉพาะยอด > 0) — ต้องคงไว้ ไม่งั้น SR ที่หักในใบนั้นถูกตัดทิ้ง ยอดที่ควรมีสูงเกิน (รีวิวรอบ 2)
     in_round |= {k for k, v in ex["res"].items() if XL._num(v.get("NETAMT")) <= 0}
+    # ใบเสร็จที่ชำระ IV ซึ่งพนักงานลงว่าจ่ายแล้วในรอบนี้ (doc_type IV) ก็อยู่ในรอบ — เงินนับจากใบ IV
+    #   แต่ SR ที่ใบเสร็จนั้นหักไว้ (เช่น %ช่าง BK 17/10 SR0005167 ใน RE0061962) ต้องยังนับ (ตรวจกับ production 18 ต.ค.)
+    iv_docs = {d.get("doc_no") for d in detail.get("docs") or [] if d.get("doc_type") == "IV"}
+    in_round |= {rn for rn, ls in (ex.get("lines") or {}).items()
+                 if any(ln["rectyp"] == "3" and ln["doc_no"] in iv_docs for ln in ls)}
     netted = {}
     for rn, ls in (ex.get("lines") or {}).items():
         for ln in ls:
