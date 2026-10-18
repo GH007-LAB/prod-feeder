@@ -26,7 +26,25 @@ import so_push as S
 import cash_feed as F
 import cash_excel_fill as XL
 
-VERSION = 1
+VERSION = 3
+
+# ฟอร์ม Excel มีแถวจำกัด (IV 60 · AI 8 · SR 7 · วางบิล 20 · ค่าใช้จ่าย 16) — build_plan ตัดท้ายเมื่อเกิน
+# สรุปรายวันต้องรวมครบทุกใบ (SKN 14/10: SR 11 ใบ วางบิล 40 รายการ) จึงคำนวณด้วยช่วงแถวเสมือนที่ไม่ชนกัน
+_REPORT_ROWS = {"IV_ROWS": range(1000, 3000), "AI_ROWS": range(3000, 4000), "SR_ROWS": range(4000, 5000),
+                "PAID_ROWS": range(5000, 8000), "EXP_ROWS": range(8000, 9000)}
+
+
+class _unbounded(object):
+    """ช่วงแถวของ cash_excel_fill ชั่วคราว (เฉพาะคำนวณสรุป ไม่ใช่เติม Excel)"""
+    def __enter__(self):
+        self.old = {k: getattr(XL, k) for k in _REPORT_ROWS}
+        for k, v in _REPORT_ROWS.items():
+            setattr(XL, k, v)
+
+    def __exit__(self, *a):
+        for k, v in self.old.items():
+            setattr(XL, k, v)
+
 
 
 def _sum(plan, rows, col):
@@ -35,10 +53,10 @@ def _sum(plan, rows, col):
 
 
 def app_cash(detail):
-    """เงินสดของใบ RE/AI ในรอบตามช่องทางที่พนักงานเลือก (ฐานเดียวกับ cash__calc ของ Supabase)"""
+    """เงินสดของใบในรอบ (RE/AI/IV ที่ลงว่าจ่ายแล้ว) ตามช่องทางที่พนักงานเลือก — ฐานเดียวกับ cash__calc"""
     tot = 0.0
     for d in (detail or {}).get("docs") or []:
-        if d.get("doc_type") not in ("RE", "AI"):
+        if d.get("doc_type") not in ("RE", "AI", "IV"):
             continue
         m = XL._money_of(d, XL._num(d.get("amount_now")))
         if m:
@@ -58,7 +76,9 @@ def summarize(plan, ex=None):
     r = lambda v: round(v, 2)
     out = {
         "version": VERSION,
-        "c113": r(iv["F"] + iv["H"] + iv["I"] + paid_bill - sr["F"] - sr["H"] - sr["I"]),
+        # − ส่วนที่แถววางบิลลงเต็มยอดแต่หักคืนสินค้าในใบเสร็จโอน/QR (ลดหนี้ ไม่ได้รับเงิน) — รีวิว 18 ต.ค. 69
+        "c113": r(iv["F"] + iv["H"] + iv["I"] + paid_bill - sr["F"] - sr["H"] - sr["I"]
+                  - float(getattr(plan, "paid_unfilled_short", 0) or 0)),
         "c114": iv["H"], "c115": iv["I"], "c116": iv["F"],
         "c117": ai["F"], "c118": ai["H"], "c119": ai["I"],
         "c120": paid_cash, "c121": sr["F"], "c122": expense,
@@ -83,13 +103,16 @@ def compute(branch, day, cfg, detail=None):
         S.PROXY.update(url=cfg["PROXY_URL"], token=cfg.get("PROXY_TOKEN", ""), branch=branch)
     else:
         S.PROXY.clear()
+    basis_at = datetime.datetime.now(F.TH).isoformat(timespec="seconds")
     if detail is None:
         detail = XL.fetch_round(cfg, branch, day) or {}
     extra = [d["doc_no"] for d in (detail.get("docs") or []) if d.get("doc_type") == "RE"]
     F.clear_cache()
     ex = XL.load_express(src, day, extra)
-    plan = XL.build_plan(ex, detail, day)
-    rep = summarize(plan, ex)
+    _round_scope(ex, detail, src)
+    with _unbounded():
+        plan = XL.build_plan(ex, detail, day)
+        rep = summarize(plan, ex)
     # cash__calc (sql/015): คาดในลิ้นชัก = ยกมา + เงินสดตามแอป + cash_adjust − ค่าใช้จ่าย
     #   cash_adjust = (C116+C117+C120−C121) − เงินสด RE/AI ตามแอป → ส่วนที่ Excel นับต่างจากยอดใบเสร็จ
     #   (SR จ่ายคืนสด · ใบเสร็จหัก SR/AI ในตัวที่ลงเป็นเงินสดเต็มยอด) โดยยังใช้ช่องทางสดของแอปตอนส่ง
@@ -97,7 +120,41 @@ def compute(branch, day, cfg, detail=None):
     rep["cash_adjust"] = round(rep["c116"] + rep["c117"] + rep["c120"] - rep["c121"] - rep["app_cash"], 2)
     rep["computed_from"] = {"round_id": (detail.get("round") or {}).get("id"),
                             "has_round": bool(detail.get("round"))}
+    # เวลาที่อ่านข้อมูลรอบ (ก่อนคำนวณ) — cash_submit ใช้ตัดสินว่าสรุปยังทันการเลือกช่องทางล่าสุดไหม (sql/015)
+    rep["basis_at"] = basis_at
     return rep
+
+
+def _round_scope(ex, detail, src):
+    """ผูกใบเสร็จ/SR กับ "รอบ" ของแอป (ตัด 20:00) แทน "วันที่เอกสาร" — รีวิว 18 ต.ค. 69 ข้อ 3
+    รอบตัดแล้ว: ใบเสร็จหลังตัดรอบ (ไม่อยู่ในรอบ) ไม่นับวันนี้ · SR ที่ใบเสร็จนั้นหักไว้ย้ายไปรอบถัดไปด้วย
+    SR ที่ใบเสร็จยกมาหักไว้ (ลงวันก่อน) มานับในรอบนี้ — เงินกับ SR อยู่รอบเดียวกันเสมอ"""
+    rnd = (detail or {}).get("round") or {}
+    if not rnd or not rnd.get("cut_at"):
+        return
+    in_round = {d.get("doc_no") for d in detail.get("docs") or [] if d.get("doc_type") == "RE"}
+    netted = {}
+    for rn, ls in (ex.get("lines") or {}).items():
+        for ln in ls:
+            if ln["rectyp"] == "5":
+                netted.setdefault(ln["doc_no"], rn)
+    ex["res"] = {k: v for k, v in ex["res"].items() if k in in_round}
+    keep = [s for s in ex["srs"]
+            if netted.get((s.get("DOCNUM") or "").strip()) is None
+            or netted.get((s.get("DOCNUM") or "").strip()) in in_round]
+    # SR ที่ใบเสร็จ "ยกมา" (ออกหลังตัดรอบวันก่อน) หักไว้ และลงวันเดียวกับใบเสร็จนั้น → มานับรอบนี้ (ตามเงิน)
+    #   SR ลงวันอื่นที่หักในใบเสร็จของวันนี้ ยังนับตามวันที่ SR (ตรง Excel SKN 16/10 SR0003272/73)
+    carried = {d.get("doc_no") for d in detail.get("docs") or [] if d.get("doc_type") == "RE" and d.get("carried")}
+    have = {(s.get("DOCNUM") or "").strip() for s in keep}
+    need = {sr: rn for sr, rn in netted.items() if rn in carried and sr not in have}
+    if need:
+        for r in S.read_dbf(XL._find(src, "ARTRN.DBF"), fields={"RECTYP", "DOCNUM", "DOCDAT", "CUSCOD", "NETAMT",
+                                                                 "DOCSTAT", "YOUREF", "SONUM", "AREACOD"}):
+            doc = (r.get("DOCNUM") or "").strip()
+            if doc in need and (r.get("RECTYP") or "").strip() == "5" and (r.get("DOCSTAT") or "").strip() != F.CANCELLED \
+                    and r.get("DOCDAT") == (ex["res"].get(need[doc]) or {}).get("DOCDAT"):
+                keep.append(r)
+    ex["srs"] = sorted(keep, key=lambda r: (r.get("DOCNUM") or ""))
 
 
 def _src_stamp(cfg):
@@ -106,7 +163,7 @@ def _src_stamp(cfg):
     if cfg.get("PROXY_URL") or not src:
         return "proxy-%d" % (int(time.time()) // 300)
     parts = []
-    for n in ("ARTRN.DBF", "ARRCPIT.DBF"):
+    for n in ("ARTRN.DBF", "ARRCPIT.DBF", "STCRD.DBF"):
         p = XL._find(src, n)
         try:
             st = os.stat(p)
@@ -145,6 +202,18 @@ def _save_state(st):
     os.replace(tmp, _state_path())
 
 
+def unlocked_days(cfg):
+    """รอบที่ CTO ปลดล็อก (พนักงานกำลังแก้/ส่งใหม่) → คำนวณสรุปใหม่ด้วยแม้เก่ากว่าเมื่อวาน (รีวิวข้อ 2)"""
+    try:
+        rows = XL._rest_get(cfg, "/rest/v1/cash_round?status=eq.unlocked&select=branch,round_date") or []
+    except Exception:
+        return {}
+    out = {}
+    for r in rows:
+        out.setdefault(r["branch"], set()).add(datetime.date.fromisoformat(r["round_date"]))
+    return out
+
+
 def push(cfg, branch, day, rep):
     F.RPC(cfg, "cash_feed_report", {"p_branch": branch, "p_date": day.isoformat(), "p_report": rep})
 
@@ -153,27 +222,40 @@ def push_due(cfg_of, branches, days, force=False):
     """cash_poller: คำนวณ/ push เฉพาะสาขา-วันที่ fingerprint เปลี่ยน · คืน [(br, date, 'pushed'|'same'|'error')]"""
     st = _load_state()
     out = []
+    extra = {}
+    try:
+        extra = unlocked_days(cfg_of(branches[0]))
+    except Exception:
+        pass
     for br in branches:
-        for day in days:
+        for day in sorted(set(days) | extra.get(br, set())):
             key = "%s|%s" % (br, day.isoformat())
             try:
                 cfg = cfg_of(br)
+                basis_at = datetime.datetime.now(F.TH).isoformat(timespec="seconds")
                 detail = XL.fetch_round(cfg, br, day) or {}
                 fp = "%d|%s|%s" % (VERSION, _src_stamp(cfg), _detail_stamp(detail))
                 if not force and st.get(key) == fp:
                     out.append((br, day.isoformat(), "same"))
                     continue
                 rep = compute(br, day, cfg, detail)
+                rep["basis_at"] = basis_at
                 push(cfg, br, day, rep)
                 st[key] = fp
+                st.pop("err|" + key, None)
                 out.append((br, day.isoformat(), "pushed"))
             except F.RpcMissing:
                 raise
             except Exception as e:
-                S.log("ERROR: CASH_REPORT %s %s %s: %s" % (br, day, type(e).__name__, e))
+                # log ครั้งเดียวต่อปัญหา (กัน alert_scan แจ้ง LINE ซ้ำทุกนาที — รีวิวข้อ 8) · ยังลองใหม่ทุกรอบ
+                msg = "%s: %s" % (type(e).__name__, e)
+                if st.get("err|" + key) != msg:
+                    S.log("ERROR: CASH_REPORT %s %s %s" % (br, day, msg))
+                    st["err|" + key] = msg
                 out.append((br, day.isoformat(), "error"))
     # เก็บ state ไม่เกิน 10 วันล่าสุด
-    keep = {k: v for k, v in st.items() if k.split("|")[1] >= (days[-1] - datetime.timedelta(days=10)).isoformat()}
+    lim = (max(days) - datetime.timedelta(days=40)).isoformat() if days else ""
+    keep = {k: v for k, v in st.items() if k.split("|")[-1] >= lim}
     _save_state(keep)
     return out
 

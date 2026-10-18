@@ -239,24 +239,15 @@ def load_express(src, day, extra_re=()):
         for r in S.read_dbf(ist, fields={"TABTYP", "TYPCOD", "SHORTNAM", "TYPDES"}):
             if (r.get("TABTYP") or "").strip() == "40":
                 areas[(r.get("TYPCOD") or "").strip()] = F.norm(r.get("SHORTNAM") or r.get("TYPDES"))
-    # SR ที่เป็น %ช่าง/คอมแพลตฟอร์มทั้งใบ (บรรทัด STCRD) = ลดหนี้ ไม่ได้จ่ายเงินสดจากลิ้นชัก (CTO/Finny 18 ต.ค. 69)
-    #   นิยามเดียวกับ sopo_month.py (iscomm) · ใบคืนสินค้าปกติ = จ่ายคืนเงินสด
-    sr_comm = set()
-    sr_nos = {(r.get("DOCNUM") or "").strip() for r in srs}
-    stc = _find(src, "STCRD.DBF")
-    if sr_nos and S._file_exists(stc):
-        kinds = {}
-        for r in S.read_dbf(stc, fields={"DOCNUM", "STKCOD", "STKDES", "TRNVAL"}):
-            doc = (r.get("DOCNUM") or "").strip()
-            if doc not in sr_nos or _num(r.get("TRNVAL")) <= 0:
-                continue
-            kinds.setdefault(doc, set()).add(_is_comm_line(r))
-        sr_comm = {d for d, k in kinds.items() if k == {True}}
+    # ชนิด SR ของวันนี้ + SR ที่ใบเสร็จของวันนี้/ยกมาหักไว้ (อาจลงวันอื่น) — ใช้ตัดสินช่องและการเติมส่วนขาด
+    sr_kind = sr_kinds(src, {(r.get("DOCNUM") or "").strip() for r in srs}
+                       | {ln["doc_no"] for ls in lines.values() for ln in ls if ln["rectyp"] == "5"})
     key = lambda r: (r.get("DOCNUM") or "")
     return {"day": day, "ivs": sorted(ivs, key=key), "ais": sorted(ais, key=key),
             "srs": sorted(srs, key=key), "res": res, "lines": lines, "iv_index": iv_index,
             "customers": customers, "areas": areas, "has_arrcpit": S._file_exists(rc),
-            "sr_comm": sr_comm}
+            "sr_kind": sr_kind,
+            "sr_comm": {d for d, k in sr_kind.items() if k == "contractor"}}
 
 
 def _youref_noncash(youref):
@@ -265,12 +256,33 @@ def _youref_noncash(youref):
     return any(k in y for k in ("kshop", "ksme", "qr", "โอน", "k shop", "scb"))
 
 
-def _is_comm_line(r):
-    """บรรทัด SR ที่เป็น %ช่าง/คอมมิชชั่น/คอมแพลตฟอร์ม — ตรงกับ sopo_month.py"""
+def sr_kind_of_line(r):
+    """ชนิดบรรทัด SR (STCRD): 'contractor' = %ช่าง/ผู้รับเหมา (07COMMISSION-A) · 'platform' = คอมแพลตฟอร์ม/
+    คืนเงินออนไลน์ (07COMMISSON-ONLINE, 07COMMISSION-REFUND) · 'goods' = คืนสินค้า — นิยามตาม sopo_month.py"""
     code = (r.get("STKCOD") or "").strip().upper()
     desc = (r.get("STKDES") or "").replace("\xa0", " ")
-    return (code.startswith(("07COMM", "07COMI")) or "เปอร์เซ็นต์ช่าง" in desc
-            or "ผู้รับเหมา" in desc or "คอมมิช" in desc)
+    if code.startswith(("07COMM", "07COMI")) or "คอมมิช" in desc or "เปอร์เซ็นต์ช่าง" in desc or "ผู้รับเหมา" in desc:
+        if "ONLINE" in code or "REFUND" in code or "แพล" in desc:
+            return "platform"
+        return "contractor"
+    return "goods"
+
+
+def sr_kinds(src, sr_nos):
+    """{sr_no: 'contractor'|'platform'|'goods'} จากบรรทัด STCRD · ปนหลายชนิด = goods (ถือเป็นคืนสินค้า)"""
+    out = {}
+    stc = _find(src, "STCRD.DBF")
+    if not sr_nos or not S._file_exists(stc):
+        return {d: "goods" for d in sr_nos}
+    kinds = {}
+    for r in S.read_dbf(stc, fields={"DOCNUM", "STKCOD", "STKDES", "TRNVAL"}):
+        doc = (r.get("DOCNUM") or "").strip()
+        if doc in sr_nos and _num(r.get("TRNVAL")) > 0:
+            kinds.setdefault(doc, set()).add(sr_kind_of_line(r))
+    for d in sr_nos:
+        k = kinds.get(d) or {"goods"}
+        out[d] = next(iter(k)) if len(k) == 1 else "goods"
+    return out
 
 
 _AMPHOE = re.compile(r"(?:อ\.|อำเภอ)\s*([^\s\d]+)")
@@ -368,6 +380,7 @@ class Plan(object):
         self.comments = {}    # coord -> text
         self.notes = []       # ข้อสังเกตลง log/รายงาน (ไม่มีชื่อลูกค้า)
         self.stats = {}
+        self.paid_unfilled_short = 0.0
 
     def set(self, coord, value):
         if value is None or value == "":
@@ -420,6 +433,13 @@ def build_plan(ex, detail, day, full_name=None):
 
     # RE ที่เกี่ยวกับวันนี้: RE ใน Express ลงวันนี้ ∪ RE ในรอบของแอป (รวมใบยกมา)
     re_nos = set(ex["res"]) | {k for k, d in docs.items() if d.get("doc_type") == "RE"}
+    # ใบเสร็จที่ชำระเฉพาะ IV ที่พนักงานลงว่าจ่ายแล้วในแอป (doc_type IV · sql/009) — เงินนับจากใบ IV แล้ว
+    #   ไม่นับใบเสร็จซ้ำ (รีวิว 18 ต.ค. 69: SKN 17/10 ยอดเบิ้ล 2 เท่า)
+    iv_docs = {k for k, d in docs.items() if d.get("doc_type") == "IV" and d.get("channel")}
+    def _covered(re_no):
+        ivl = [ln for ln in ex["lines"].get(re_no, []) if ln["rectyp"] == "3"]
+        return bool(ivl) and all(ln["doc_no"] in iv_docs for ln in ivl)
+    re_nos = {x for x in re_nos if not _covered(x)}
 
     def re_money(re_no):
         r = ex["res"].get(re_no) or {}
@@ -448,7 +468,7 @@ def build_plan(ex, detail, day, full_name=None):
             continue
         # ใบเสร็จโอน/QR ที่หัก "คืนสินค้า" ในตัว: ส่วนที่ขาด = ลดหนี้ → IV เหลือเชื่อ (G) ไม่เติมเป็นยอดโอน
         #   (Excel BK 17/10 IV6905072: H 6,632.90 โอนจริง + G 6,154.40 = SR0005166) · %ช่าง ยังเติมตามเดิม
-        goods_sr = any(ln["rectyp"] == "5" and ln["doc_no"] not in (ex.get("sr_comm") or ())
+        goods_sr = any(ln["rectyp"] == "5" and (ex.get("sr_kind") or {}).get(ln["doc_no"], "goods") == "goods"
                        for ln in ex["lines"].get(re_no, []))
         fill = not (money and money[1] > 0.005 and goods_sr)
         alloc = _alloc(lines, money, fill) if money else [(ln, None, None, 0.0) for ln in lines]
@@ -462,6 +482,27 @@ def build_plan(ex, detail, day, full_name=None):
                 same_day_pay.setdefault(ln["doc_no"], []).append((re_no, c, n, nc, short))
             else:
                 paid_rows.append((re_no, ln["doc_no"], ln["amount"], c, n, nc, short, carried))
+                if not fill and short > 0.005:
+                    # แถววางบิลลง H เต็มยอดรายการ แต่ส่วนที่หักคืนสินค้า (ลดหนี้ G) ไม่ได้รับเงิน → C113 ต้องหักออก
+                    P.paid_unfilled_short = _num(P.paid_unfilled_short + short)
+
+    # ใบ IV ที่พนักงานลงว่าจ่ายแล้ว (doc_type IV · sql/009) — นับเข้ารอบเหมือนใบเสร็จ ช่องทางตามที่เลือก
+    #   ใบของวันนี้ → ลงแถว IV · ใบวันก่อน → แถววางบิล (รีวิว 18 ต.ค. 69: เดิมตกเป็นเงินเชื่อ ทำให้ C124 ต่ำกว่าจริง)
+    for k, d in sorted(docs.items()):
+        if d.get("doc_type") != "IV":
+            continue
+        # ยอดใช้ NETAMT ของ IV ใน Express (Finny T9: IV6905066 AMOUNT 6,682.60 / NETAMT 6,682) ถ้าหาเจอ
+        ivr = next((r for r in ex["ivs"] if (r.get("DOCNUM") or "").strip() == k), None) or ex["iv_index"].get(k)
+        amt = _num(d.get("amount_now"))
+        if ivr and abs(_num(ivr.get("NETAMT")) - amt) < 1:   # ต่างแค่เศษสตางค์ (AMOUNT vs NETAMT) → NETAMT
+            amt = _num(ivr.get("NETAMT"))
+        m = _money_of(dict(d, amount_now=amt) if d.get("channel") != "mixed" else d, amt)
+        if m is None:
+            continue
+        if k in day_iv:
+            same_day_pay.setdefault(k, []).append((k, m[0], m[1], m[2], 0.0))
+        else:
+            paid_rows.append((k, k, amt, m[0], m[1], m[2], 0.0, bool(d.get("carried"))))
 
     # ---- แถว 3–62: IV ของวัน ----
     if len(ex["ivs"]) > len(IV_ROWS):
@@ -540,30 +581,35 @@ def build_plan(ex, detail, day, full_name=None):
         m = _IV_RE.search(r.get("YOUREF") or "") or _IV_RE.search(r.get("SONUM") or "")
         if m:
             P.set("C%d" % row, m.group(0))
-        # 18 ต.ค. 69 — กติกาที่ตรงกับ Excel ที่ Finny แก้แล้ว (BK/PPS/SKN 16–17/10 · ทุกใบ SR):
-        #   %ช่าง/คอมฯ หักในใบเสร็จ   → F (จ่ายช่างเป็นเงินสดจากลิ้นชัก แม้ลูกค้าจ่ายโอน/QR)
-        #   %ช่าง/คอมฯ ไม่ได้หักในใบเสร็จ → G (ลดหนี้ ยังไม่จ่าย)
+        # 18 ต.ค. 69 — กติกาที่ตรงกับ Excel ที่ Finny แก้แล้ว (BK/PPS/SKN 16–17/10 · ทุกใบ SR) + รีวิว:
+        #   %ช่าง (contractor) หักในใบเสร็จ     → F (จ่ายช่างเป็นเงินสดจากลิ้นชัก แม้ลูกค้าจ่ายโอน/QR)
+        #   %ช่าง ไม่ได้หักในใบเสร็จ            → G (ลดหนี้ ยังไม่จ่าย)
+        #   คอมแพลตฟอร์ม/คืนเงินออนไลน์ หัก    → ช่องเดียวกับใบเสร็จ (เดิม) · ไม่หัก → G — ไม่ใช่เงินจากลิ้นชัก
         #   คืนสินค้า หักในใบเสร็จเงินสด → F · หักในใบเสร็จโอน/QR → G (ลูกค้าจ่ายสุทธิ ไม่มีเงินออก)
-        #   คืนสินค้า ไม่ได้หักในใบเสร็จ → F (จ่ายคืนเงินสด)
+        #   คืนสินค้า ไม่ได้หักในใบเสร็จ        → F (จ่ายคืนเงินสด)
         #   ช่องทางใบเสร็จ: ตามที่เลือกในแอป · ยังไม่เลือก = เดาจาก YOUREF ของ Express (KSME/KSHOP/QR = ไม่ใช่เงินสด)
         sr_no = (r.get("DOCNUM") or "").strip()
         # หาใบเสร็จที่หัก SR จาก ARRCPIT ตรง ๆ (sr_col ข้ามใบเสร็จยอด ≤ 0 เช่น RE จ่ายค่า%ช่าง −200)
         by_re = sr_col.get(sr_no, (None, None))[1] or next(
             (rn for rn, ls in sorted(ex["lines"].items()) for ln in ls
              if ln["rectyp"] == "5" and ln["doc_no"] == sr_no), None)
-        comm = sr_no in (ex.get("sr_comm") or ())
+        kind = (ex.get("sr_kind") or {}).get(sr_no, "goods")
         if by_re:
-            if comm:
+            m = re_money(by_re)
+            noncash = (m[1] > 0.005) if m else _youref_noncash((ex["res"].get(by_re) or {}).get("YOUREF"))
+            if kind == "contractor":
                 col = "F"
+            elif kind == "platform":
+                col = (CHANNEL_COL[m[2]] if m and m[1] > 0.005 else
+                       ("H" if noncash else "F"))
             else:
-                m = re_money(by_re)
-                cash_re = (m[1] <= 0.005) if m else not _youref_noncash((ex["res"].get(by_re) or {}).get("YOUREF"))
-                col = "F" if cash_re else "G"
+                col = "G" if noncash else "F"
         else:
-            col = "G" if comm else "F"
+            col = "F" if kind == "goods" else "G"
         P.set("%s%d" % (col, row), _num(r.get("NETAMT")))
-        P.comment("A%d" % row, ("%ช่าง/คอมฯ" if comm else "คืนสินค้า") + (" หักในใบเสร็จ %s" % by_re if by_re else "")
-                  + (" — จ่ายเงินสด" if col == "F" else " — ลดหนี้ ไม่จ่ายเงินสด"))
+        label = {"contractor": "%ช่าง", "platform": "คอมแพลตฟอร์ม", "goods": "คืนสินค้า"}[kind]
+        P.comment("A%d" % row, label + (" หักในใบเสร็จ %s" % by_re if by_re else "")
+                  + (" — จ่ายเงินสด" if col == "F" else " — ลดหนี้ ไม่จ่ายเงินสด" if col == "G" else " — ตามใบเสร็จ"))
 
     # ---- แถว 90–109: วางบิลชำระแล้ว (RE วันนี้ที่ชำระ IV วันก่อน + RE ยกมา) ----
     if len(paid_rows) > len(PAID_ROWS):

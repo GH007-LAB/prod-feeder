@@ -48,7 +48,7 @@ class SummarizeTest(unittest.TestCase):
         self.assertEqual(s["sr_cash_refund"], 300)
         json.dumps(s)   # serialise ได้
 
-    def test_app_cash_counts_re_ai_only(self):
+    def test_app_cash_counts_re_ai_iv(self):
         det = {"docs": [
             {"doc_no": "RE1", "doc_type": "RE", "channel": "cash", "amount_now": 100},
             {"doc_no": "RE2", "doc_type": "RE", "channel": "mixed", "cash_amount": 40, "amount_now": 100,
@@ -56,7 +56,8 @@ class SummarizeTest(unittest.TestCase):
             {"doc_no": "AI1", "doc_type": "AI", "channel": "transfer", "amount_now": 500},
             {"doc_no": "IV1", "doc_type": "IV", "channel": "cash", "amount_now": 999},
             {"doc_no": "RE3", "doc_type": "RE", "channel": None, "amount_now": 70}]}
-        self.assertEqual(R.app_cash(det), 140)
+        # IV ที่พนักงานลงว่าจ่ายแล้ว (sql/009) นับด้วย — build_plan ก็ลงแถว IV ให้แล้ว
+        self.assertEqual(R.app_cash(det), 1139)
 
     def test_detail_stamp_changes_with_channel(self):
         a = {"round": {"id": 1, "status": "open"}, "docs": [{"doc_no": "RE1", "channel": None}]}
@@ -78,7 +79,7 @@ class MockRPC(object):
                 raise F.RpcMissing(fn)
             assert set(args) == {"p_branch", "p_date", "p_report"}
             rep = args["p_report"]
-            assert rep["version"] == R.VERSION and "c113" in rep and "cash_adjust" in rep
+            assert rep["version"] == R.VERSION and "c113" in rep and "cash_adjust" in rep and rep.get("basis_at")
             json.dumps(rep)
             assert "notes" in rep and all("ลูกค้า" not in n for n in rep["notes"])
             return {"ok": True}
@@ -114,6 +115,19 @@ class PushDueTest(unittest.TestCase):
         F.RPC = MockRPC(missing=True)
         with self.assertRaises(F.RpcMissing):
             R.push_due(self.cfg, ["BK"], [self.DAY])
+
+    def test_sr_kind_of_line(self):
+        self.assertEqual(XL.sr_kind_of_line({"STKCOD": "07COMMISSION-A", "STKDES": "เปอร์เซ็นต์ช่าง/ผู้รับเหมา"}), "contractor")
+        self.assertEqual(XL.sr_kind_of_line({"STKCOD": "07COMMISSON-ONLINE", "STKDES": "คอมมิชชั่นแพล็ตฟอร์ม"}), "platform")
+        self.assertEqual(XL.sr_kind_of_line({"STKCOD": "07COMMISSION-REFUND", "STKDES": "คืนเงิน"}), "platform")
+        self.assertEqual(XL.sr_kind_of_line({"STKCOD": "01WC-GRST-030-DMN", "STKDES": "ผนัง"}), "goods")
+
+    def test_skn_14_platform_commission_not_cash(self):
+        # รีวิว 18 ต.ค. 69: คอมแพลตฟอร์มออนไลน์ (SR0003263–71 ~364k หักในใบเสร็จโอน) ห้ามเป็นเงินสดจ่ายออก
+        F.RPC = MockRPC()
+        rep = R.compute("SKN", datetime.date(2026, 10, 14), self.cfg("SKN"), detail={})
+        self.assertLess(rep["c121"], 10000)
+        self.assertGreater(rep["sr_transfer"], 300000)
 
     def test_bk_17_sr_rules_match_excel(self):
         # Excel ที่ Finny แก้แล้ว BK 17/10: C121 = 500 (SR0005167/68 %ช่างหักในใบเสร็จ → เงินสด)

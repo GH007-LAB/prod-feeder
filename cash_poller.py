@@ -223,7 +223,8 @@ def run_once(cfgs=None, root=None):
         try:
             res = RP.push_due(cfg_of, BRANCHES, [today - datetime.timedelta(days=1), today])
             pushed = ["%s %s" % (b, d) for b, d, s in res if s == "pushed"]
-            if pushed:
+            # บรรทัดสำเร็จ (มีคำ CASH_REPORT = alert_scan ถือว่าฟื้น) พิมพ์เฉพาะรอบที่ไม่มี error เลย
+            if pushed and not any(s == "error" for _b, _d, s in res):
                 S.log("CASH_REPORT: สรุปยอดขายประจำวัน %s" % ", ".join(pushed))
             summary["report"] = {s: sum(1 for x in res if x[2] == s) for s in ("pushed", "same", "error")}
         except F.RpcMissing:
