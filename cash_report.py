@@ -9,7 +9,8 @@ CTO 18 ต.ค. 69: "ปิดรอบต้องโชว์ยอดขา�
   C113 ยอดรับชำระหนี้ตามโปรแกรม Express = F63+H63+I63+H110−F82−H82−I82
   C114/C115/C116 = H63/I63/F63 (IV วันนี้: โอน Kbank / QR / เงินสด)
   C117/C118/C119 = F73/H73/I73 (มัดจำ AI: เงินสด / โอน / QR)
-  C120 = J110 (วางบิลชำระด้วยเงินสด) · C121 = F82 (คืนสินค้าจ่ายคืนเงินสด) · C122 = K130 (ค่าใช้จ่าย)
+  C120 = J110 (วางบิลชำระด้วยเงินสด + เงินสดรับ/จ่ายอื่นที่พนักงานกรอก — sql/016) · C121 = F82 · C122 = K130
+    c120_bill = C120 ไม่รวมเงินสดอื่น — แอปบวกสุทธิเงินสดอื่นแบบสดเอง (cash__calc / cash_sales_report)
 แถว C123–C131 (ยกมา/คงเหลือตามระบบ/นับได้/ส่วนต่าง/เข้าบัญชี/ยกไป/ผู้จัดทำ) คิดใน Supabase
 (cash_sales_report · sql/015) เพราะขึ้นกับยอดนับ/ยอดยกไปที่พนักงานกรอก
 
@@ -26,7 +27,7 @@ import so_push as S
 import cash_feed as F
 import cash_excel_fill as XL
 
-VERSION = 3
+VERSION = 4  # 4: เงินสดรับ/จ่ายอื่น (sql/016) — c120 รวม · c120_bill ไม่รวม · cash_adjust คิดจาก c120_bill
 
 # ฟอร์ม Excel มีแถวจำกัด (IV 60 · AI 8 · SR 7 · วางบิล 20 · ค่าใช้จ่าย 16) — build_plan ตัดท้ายเมื่อเกิน
 # สรุปรายวันต้องรวมครบทุกใบ (SKN 14/10: SR 11 ใบ วางบิล 40 รายการ) จึงคำนวณด้วยช่วงแถวเสมือนที่ไม่ชนกัน
@@ -82,6 +83,9 @@ def summarize(plan, ex=None):
         "c114": iv["H"], "c115": iv["I"], "c116": iv["F"],
         "c117": ai["F"], "c118": ai["H"], "c119": ai["I"],
         "c120": paid_cash, "c121": sr["F"], "c122": expense,
+        # sql/016: แถวเงินสดรับ/จ่ายอื่นอยู่ใน J110 ด้วย (ตรง Excel) · c120_bill = เฉพาะวางบิล
+        "c120_bill": r(paid_cash - float(getattr(plan, "other_net", 0) or 0)),
+        "other_cash_net": r(float(getattr(plan, "other_net", 0) or 0)),
         # ประกอบ (ไม่อยู่ใน 19 แถว แต่ช่วยอ่าน/ตรวจ)
         "iv_credit": iv["G"], "iv_deposit_used": iv["E"],
         "paid_bill_total": paid_bill, "paid_transfer": paid_xfer,
@@ -115,9 +119,10 @@ def compute(branch, day, cfg, detail=None):
         rep = summarize(plan, ex)
     # cash__calc (sql/015): คาดในลิ้นชัก = ยกมา + เงินสดตามแอป + cash_adjust − ค่าใช้จ่าย
     #   cash_adjust = (C116+C117+C120−C121) − เงินสด RE/AI ตามแอป → ส่วนที่ Excel นับต่างจากยอดใบเสร็จ
+    #   sql/016: ใช้ c120_bill (ไม่รวมเงินสดอื่น) — cash__calc บวกเงินสดอื่นจากตารางเองแบบสด ห้ามนับซ้ำ
     #   (SR จ่ายคืนสด · ใบเสร็จหัก SR/AI ในตัวที่ลงเป็นเงินสดเต็มยอด) โดยยังใช้ช่องทางสดของแอปตอนส่ง
     rep["app_cash"] = app_cash(detail)
-    rep["cash_adjust"] = round(rep["c116"] + rep["c117"] + rep["c120"] - rep["c121"] - rep["app_cash"], 2)
+    rep["cash_adjust"] = round(rep["c116"] + rep["c117"] + rep["c120_bill"] - rep["c121"] - rep["app_cash"], 2)
     rep["computed_from"] = {"round_id": (detail.get("round") or {}).get("id"),
                             "has_round": bool(detail.get("round"))}
     # เวลาที่อ่านข้อมูลรอบ (ก่อนคำนวณ) — cash_submit ใช้ตัดสินว่าสรุปยังทันการเลือกช่องทางล่าสุดไหม (sql/015)
@@ -184,7 +189,8 @@ def _detail_stamp(detail):
     docs = sorted((d.get("doc_no"), d.get("channel"), d.get("cash_amount"), d.get("noncash_channel"),
                    d.get("amount_now"), d.get("carried"), d.get("chosen_at")) for d in detail.get("docs") or [])
     exps = sorted((e.get("id"), e.get("amount"), e.get("deleted_at")) for e in detail.get("expenses") or [])
-    blob = json.dumps([rnd.get("id"), rnd.get("status"), rnd.get("cut_at"), docs, exps], default=str, ensure_ascii=False)
+    oth = sorted((o.get("id"), o.get("direction"), o.get("amount")) for o in detail.get("other_cash") or [])
+    blob = json.dumps([rnd.get("id"), rnd.get("status"), rnd.get("cut_at"), docs, exps, oth], default=str, ensure_ascii=False)
     return hashlib.sha1(blob.encode("utf-8")).hexdigest()[:16]
 
 

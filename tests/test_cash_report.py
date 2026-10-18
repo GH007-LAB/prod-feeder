@@ -66,6 +66,53 @@ class SummarizeTest(unittest.TestCase):
         self.assertEqual(R._detail_stamp(a), R._detail_stamp(json.loads(json.dumps(a))))
 
 
+class OtherCashTest(unittest.TestCase):
+    """sql/016 เงินสดรับ/จ่ายอื่น: ลงแถววางบิลไม่มีเลขใบ (J) แบบ Excel · c120 รวม · c120_bill/cash_adjust ไม่รวม"""
+    EX = {"day": None, "ivs": [], "ais": [], "srs": [], "res": {}, "lines": {}, "iv_index": {},
+          "customers": {}, "areas": {}, "has_arrcpit": True, "sr_kind": {}, "sr_comm": set()}
+
+    def detail(self, others):
+        return {"round": {"id": 9, "status": "cut", "float_amount": 5000}, "docs": [], "expenses": [],
+                "other_cash": others}
+
+    def test_rows_and_summary(self):
+        day = datetime.date(2026, 10, 17)
+        det = self.detail([{"id": 1, "direction": "in", "amount": 102, "reason": "คืนเงินค่าส่งพัสดุลอนผนัง"},
+                           {"id": 2, "direction": "out", "amount": 30.5, "reason": "ทอนเกิน"}])
+        p = XL.build_plan(dict(self.EX, day=day), det, day)
+        self.assertEqual(p.cells.get("J90"), 102)
+        self.assertEqual(p.cells.get("J91"), -30.5)
+        self.assertTrue(p.cells["B90"].startswith("เงินสดรับอื่น: คืนเงินค่าส่งพัสดุ"))
+        self.assertTrue(p.cells["B91"].startswith("เงินสดจ่ายอื่น: "))
+        self.assertNotIn("A90", p.cells)          # ไม่มีเลขใบ (แบบที่พนักงานพิมพ์)
+        self.assertNotIn("H90", p.cells)          # ไม่เข้า C113 (H110)
+        self.assertEqual(p.stats["other_cash"], 2)
+        s = R.summarize(p)
+        self.assertEqual(s["c120"], 71.5)         # = J110 ตรง Excel
+        self.assertEqual(s["c120_bill"], 0)
+        self.assertEqual(s["other_cash_net"], 71.5)
+        self.assertEqual(s["c113"], 0)
+
+    def test_overflow_collapses_and_reserves_row(self):
+        day = datetime.date(2026, 10, 17)
+        det = self.detail([{"id": i, "direction": "in", "amount": 10, "reason": "x%d" % i} for i in range(3)])
+        old = XL.PAID_ROWS
+        try:
+            XL.PAID_ROWS = range(90, 92)          # จำลองแถวเต็ม: 2 แถว 3 รายการ
+            p = XL.build_plan(dict(self.EX, day=day), det, day)
+        finally:
+            XL.PAID_ROWS = old
+        self.assertEqual(p.cells.get("J90"), 30)  # รวมแถวเดียว ยอดครบ
+        self.assertNotIn("J91", p.cells)
+        self.assertEqual(R.summarize(p)["other_cash_net"], 30)
+
+    def test_ignores_bad_rows_and_stamp_changes(self):
+        self.assertEqual(XL.other_cash_rows({"other_cash": [{"direction": "in", "amount": 0, "reason": "x"}]}), [])
+        a = R._detail_stamp(self.detail([]))
+        b = R._detail_stamp(self.detail([{"id": 1, "direction": "in", "amount": 1}]))
+        self.assertNotEqual(a, b)                 # เพิ่มเงินสดอื่น → push สรุปใหม่
+
+
 class MockRPC(object):
     def __init__(self, missing=False):
         self.calls, self.missing = [], missing

@@ -323,12 +323,40 @@ def cus_name(r, ex):
 # แอปปิดรอบ (Supabase)
 # =====================================================================================
 def fetch_round(cfg, branch, day):
-    """cash_round_detail(p_branch, p_date) → dict (round อาจเป็น None) · RPC ยังไม่มี → None"""
+    """cash_round_detail(p_branch, p_date) → dict (round อาจเป็น None) · RPC ยังไม่มี → None
+    + other_cash = เงินสดรับ/จ่ายอื่นของรอบ (sql/016) — ตารางยังไม่มี = [] """
     try:
-        return F.RPC(cfg, "cash_round_detail", {"p_branch": branch, "p_date": day.isoformat()}) or {}
+        detail = F.RPC(cfg, "cash_round_detail", {"p_branch": branch, "p_date": day.isoformat()}) or {}
     except F.RpcMissing:
         S.log("CASH_EXCEL: %s ยังไม่มี RPC cash_round_detail — เติมจาก Express อย่างเดียว" % branch)
         return None
+    rid = (detail.get("round") or {}).get("id")
+    if rid is not None:
+        detail["other_cash"] = fetch_other_cash(cfg, rid)
+    return detail
+
+
+def fetch_other_cash(cfg, round_id):
+    """cash_other_cash ของรอบ (ยังไม่ลบ) ด้วย service key · 404 (ยังไม่รัน sql/016) = []
+    error อื่นโยนต่อ — ห้ามเงียบเป็น [] ไม่งั้นยอดที่ควรมีใน Excel ขาดโดยไม่มีใครเห็น"""
+    try:
+        return _rest_get(cfg, "/rest/v1/cash_other_cash?round_id=eq.%d&deleted_at=is.null"
+                              "&select=id,direction,amount,reason&order=id" % int(round_id)) or []
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return []
+        raise
+
+
+def other_cash_rows(detail):
+    """[(reason, ยอดมีเครื่องหมาย)] รับ = + จ่าย = − (Excel: แถววางบิลไม่มีเลขใบ ช่อง J → C120)"""
+    out = []
+    for o in (detail or {}).get("other_cash") or []:
+        amt = _num(o.get("amount"))
+        if amt <= 0:
+            continue
+        out.append((F.norm(o.get("reason")) or "เงินสดอื่น", amt if o.get("direction") == "in" else -amt))
+    return out
 
 
 def _rest_get(cfg, path, timeout=15):
@@ -381,6 +409,7 @@ class Plan(object):
         self.notes = []       # ข้อสังเกตลง log/รายงาน (ไม่มีชื่อลูกค้า)
         self.stats = {}
         self.paid_unfilled_short = 0.0
+        self.other_net = 0.0  # เงินสดรับ − จ่ายอื่น ที่ลงในแถววางบิล (sql/016) — สรุปแยกออกจาก C120 วางบิล
 
     def set(self, coord, value):
         if value is None or value == "":
@@ -612,9 +641,18 @@ def build_plan(ex, detail, day, full_name=None):
                   + (" — จ่ายเงินสด" if col == "F" else " — ลดหนี้ ไม่จ่ายเงินสด" if col == "G" else " — ตามใบเสร็จ"))
 
     # ---- แถว 90–109: วางบิลชำระแล้ว (RE วันนี้ที่ชำระ IV วันก่อน + RE ยกมา) ----
-    if len(paid_rows) > len(PAID_ROWS):
-        P.notes.append("รายการวางบิล %d เกิน %d แถว — ตัดท้าย" % (len(paid_rows), len(PAID_ROWS)))
-    for row, (re_no, iv_no, amt, c, n, nc, short, carried) in zip(PAID_ROWS, paid_rows):
+    # เงินสดรับ/จ่ายอื่น (sql/016) ใช้แถวท้ายของส่วนวางบิล — จองไว้ก่อน (ยอดที่ควรมีในชีตต้องครบเสมอ)
+    #   แถวไม่พอ → รวมเป็นแถวเดียว แล้วตัดแถววางบิลท้ายแทน (วางบิลเกินแถวถูกตัดอยู่แล้วตามเดิม)
+    others = other_cash_rows(detail)
+    rows_all = list(PAID_ROWS)
+    if others and len(paid_rows) + len(others) > len(rows_all):
+        net = _num(sum(a for _, a in others))
+        P.notes.append("เงินสดรับ/จ่ายอื่น %d รายการ รวมเป็นแถวเดียว (แถววางบิลไม่พอ)" % len(others))
+        others = [("รวม %d รายการ" % len(others), net)]
+    bill_rows = rows_all[:len(rows_all) - len(others)]
+    if len(paid_rows) > len(bill_rows):
+        P.notes.append("รายการวางบิล %d เกิน %d แถว — ตัดท้าย" % (len(paid_rows), len(bill_rows)))
+    for row, (re_no, iv_no, amt, c, n, nc, short, carried) in zip(bill_rows, paid_rows):
         ivr = ex["iv_index"].get(iv_no) if iv_no else None
         src_r = ivr or ex["res"].get(re_no) or {"CUSCOD": (docs.get(re_no) or {}).get("customer_code") or ""}
         P.set("A%d" % row, iv_no or re_no)
@@ -634,6 +672,15 @@ def build_plan(ex, detail, day, full_name=None):
             P.comment("A%d" % row, "%s หัก SR/AI ในใบเสร็จ %s บาท" % (re_no, short))
         if carried and (docs.get(re_no) or {}).get("carried"):
             P.comment("A%d" % row, "%s ยกมาจากรอบก่อน" % re_no)
+
+    # ---- เงินสดรับ/จ่ายอื่น (sql/016) ต่อท้ายแถววางบิล แบบที่พนักงานพิมพ์ใน Excel: ไม่มีเลขใบ · B = เหตุผล · J = ยอด
+    #   (รับ +, จ่าย −) → J110 → C120 → C124 ตามสูตรชีตเดิม
+    free = rows_all[min(len(paid_rows), len(bill_rows)):]
+    for row, (why, amt) in zip(free, others):
+        P.set("B%d" % row, ("เงินสดรับอื่น: " if amt >= 0 else "เงินสดจ่ายอื่น: ") + why)
+        P.set("J%d" % row, amt)
+        P.comment("B%d" % row, "เงินสดรับ/จ่ายอื่นจากแอปปิดรอบ (ไม่มีบิล)")
+        P.other_net = _num(P.other_net + amt)
 
     # ---- ค่าใช้จ่าย / เงินสด / ผู้จัดทำ ----
     exps = [e for e in (detail.get("expenses") or []) if not e.get("deleted_at")]
@@ -662,8 +709,8 @@ def build_plan(ex, detail, day, full_name=None):
         P.set(KPI_NOTE_CELL, F.norm(tr["lost_other_note"]))
 
     P.stats = {"iv": min(len(ex["ivs"]), len(IV_ROWS)), "ai": min(len(ai_rows), len(AI_ROWS)),
-               "sr": min(len(ex["srs"]), len(SR_ROWS)), "paid": min(len(paid_rows), len(PAID_ROWS)),
-               "expenses": len(exps), "no_channel": sum(1 for t in P.comments.values()
+               "sr": min(len(ex["srs"]), len(SR_ROWS)), "paid": min(len(paid_rows), len(bill_rows)),
+               "expenses": len(exps), "other_cash": len(others), "no_channel": sum(1 for t in P.comments.values()
                                                        if NOTE_NO_CHANNEL in t),
                "round": rnd.get("status") if has_round else None}
     return P
