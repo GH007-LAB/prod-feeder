@@ -129,6 +129,13 @@ class PushDueTest(unittest.TestCase):
         self.assertLess(rep["c121"], 10000)
         self.assertGreater(rep["sr_transfer"], 300000)
 
+    def test_skn_13_negative_receipt_commission_kept(self):
+        # รีวิวรอบ 2: RE0027211 −15,344 (จ่าย%ช่าง) ไม่อยู่ในรอบของแอป แต่ SR0003259 ที่หักไว้ต้องยังนับเป็นเงินสดจ่าย
+        F.RPC = MockRPC()
+        det = {"round": {"id": 1, "status": "cut", "cut_at": "2026-10-13T20:00:00+07:00"}, "docs": []}
+        rep = R.compute("SKN", datetime.date(2026, 10, 13), self.cfg("SKN"), detail=det)
+        self.assertGreaterEqual(rep["c121"], 15344)
+
     def test_bk_17_sr_rules_match_excel(self):
         # Excel ที่ Finny แก้แล้ว BK 17/10: C121 = 500 (SR0005167/68 %ช่างหักในใบเสร็จ → เงินสด)
         # SR0005166 คืนสินค้าหักในใบเสร็จโอน KSME → ลดหนี้ (G) ไม่ใช่เงินสด

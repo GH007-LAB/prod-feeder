@@ -221,7 +221,7 @@ def run_once(cfgs=None, root=None):
     if os.environ.get("CASH_REPORT_DISABLED") != "1":
         today = datetime.datetime.now(F.TH).date()
         try:
-            res = RP.push_due(cfg_of, BRANCHES, [today - datetime.timedelta(days=1), today])
+            res = RP.push_due(cfg_of, BRANCHES, [today - datetime.timedelta(days=1), today], db_now=tick.get("now"))
             pushed = ["%s %s" % (b, d) for b, d, s in res if s == "pushed"]
             # บรรทัดสำเร็จ (มีคำ CASH_REPORT = alert_scan ถือว่าฟื้น) พิมพ์เฉพาะรอบที่ไม่มี error เลย
             if pushed and not any(s == "error" for _b, _d, s in res):

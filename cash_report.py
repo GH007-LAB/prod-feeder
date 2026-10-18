@@ -133,6 +133,9 @@ def _round_scope(ex, detail, src):
     if not rnd or not rnd.get("cut_at"):
         return
     in_round = {d.get("doc_no") for d in detail.get("docs") or [] if d.get("doc_type") == "RE"}
+    # ใบเสร็จยอด ≤ 0 ของวัน (จ่ายค่า%ช่าง/คืนเงินสด เช่น SKN 13/10 RE0027211 −15,344) ไม่เข้ารอบในแอปอยู่แล้ว
+    #   (sql/009 รับเฉพาะยอด > 0) — ต้องคงไว้ ไม่งั้น SR ที่หักในใบนั้นถูกตัดทิ้ง ยอดที่ควรมีสูงเกิน (รีวิวรอบ 2)
+    in_round |= {k for k, v in ex["res"].items() if XL._num(v.get("NETAMT")) <= 0}
     netted = {}
     for rn, ls in (ex.get("lines") or {}).items():
         for ln in ls:
@@ -176,10 +179,12 @@ def _src_stamp(cfg):
 def _detail_stamp(detail):
     """เฉพาะส่วนที่กระทบสรุป: ช่องทางของใบ · ค่าใช้จ่าย · สถานะรอบ"""
     rnd = detail.get("round") or {}
+    # chosen_at/cut_at ด้วย: เลือกช่องทางเดิมซ้ำ หรือดึงบิลเพิ่มโดยไม่มีใบใหม่ ก็ต้อง push ใหม่ ให้ basis_at
+    #   ใหม่กว่าการเปลี่ยนล่าสุด ไม่งั้น cash_submit ตอบ CR001 ค้าง (รีวิวรอบ 2)
     docs = sorted((d.get("doc_no"), d.get("channel"), d.get("cash_amount"), d.get("noncash_channel"),
-                   d.get("amount_now"), d.get("carried")) for d in detail.get("docs") or [])
+                   d.get("amount_now"), d.get("carried"), d.get("chosen_at")) for d in detail.get("docs") or [])
     exps = sorted((e.get("id"), e.get("amount"), e.get("deleted_at")) for e in detail.get("expenses") or [])
-    blob = json.dumps([rnd.get("id"), rnd.get("status"), docs, exps], default=str, ensure_ascii=False)
+    blob = json.dumps([rnd.get("id"), rnd.get("status"), rnd.get("cut_at"), docs, exps], default=str, ensure_ascii=False)
     return hashlib.sha1(blob.encode("utf-8")).hexdigest()[:16]
 
 
@@ -218,7 +223,7 @@ def push(cfg, branch, day, rep):
     F.RPC(cfg, "cash_feed_report", {"p_branch": branch, "p_date": day.isoformat(), "p_report": rep})
 
 
-def push_due(cfg_of, branches, days, force=False):
+def push_due(cfg_of, branches, days, force=False, db_now=None):
     """cash_poller: คำนวณ/ push เฉพาะสาขา-วันที่ fingerprint เปลี่ยน · คืน [(br, date, 'pushed'|'same'|'error')]"""
     st = _load_state()
     out = []
@@ -232,7 +237,8 @@ def push_due(cfg_of, branches, days, force=False):
             key = "%s|%s" % (br, day.isoformat())
             try:
                 cfg = cfg_of(br)
-                basis_at = datetime.datetime.now(F.TH).isoformat(timespec="seconds")
+                # เวลา DB (cash_tick.now ที่ poller เรียกก่อน) — กันนาฬิกา Mac mini ไม่ตรง DB (รีวิวรอบ 2)
+                basis_at = db_now or datetime.datetime.now(F.TH).isoformat(timespec="seconds")
                 detail = XL.fetch_round(cfg, br, day) or {}
                 fp = "%d|%s|%s" % (VERSION, _src_stamp(cfg), _detail_stamp(detail))
                 if not force and st.get(key) == fp:
