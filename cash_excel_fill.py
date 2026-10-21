@@ -410,6 +410,8 @@ class Plan(object):
         self.stats = {}
         self.paid_unfilled_short = 0.0
         self.other_net = 0.0  # เงินสดรับ − จ่ายอื่น ที่ลงในแถววางบิล (sql/016) — สรุปแยกออกจาก C120 วางบิล
+        self.expense_noncash = 0.0      # sql/020: ค่าใช้จ่ายโอน/บัตรเครดิต (ไม่ลงช่อง K · ไม่หักลิ้นชัก)
+        self.expense_noncash_count = 0
 
     def set(self, coord, value):
         if value is None or value == "":
@@ -422,6 +424,53 @@ class Plan(object):
 
     def comment(self, coord, text):
         self.comments[coord] = (self.comments[coord] + "\n" + text) if coord in self.comments else text
+
+
+PAY_LABEL = {"cash": "เงินสด", "transfer": "เงินโอน", "credit_card": "บัตรเครดิต"}
+NOTE_NONCASH_EXP = "จ่ายด้วย%s ไม่ใช่เงินสดจากลิ้นชัก — ไม่ลงยอดช่อง K (ไม่หักยอดเงินคงเหลือ C124) · แอปปิดรอบ sql/020"
+
+
+def _money_text(v):
+    return "{:,.2f}".format(_num(v))
+
+
+def plan_expenses(P, expenses):
+    """ตารางค่าใช้จ่าย G114:K129 (16 แถว) → K130 → C122 → C124
+    sql/020: เฉพาะ pay_method = cash (ไม่มีคีย์ = cash · cash-app ก่อน 020) ลงยอดช่อง K
+    โอน/บัตรเครดิต: ลงชื่อรายการในช่อง G พร้อมวิธีจ่าย+ยอดในวงเล็บ ช่อง K ว่าง (แบบที่สาขาเขียนเองใน Excel —
+    เช่น BK 20/10 แถว 124 "ค่าน้ำมัน" ไม่มียอด) + comment · ต่อท้ายรายการเงินสด
+    เกิน 16 แถว: โอน/บัตรรวมเป็นแถวเดียว · เงินสดเกินที่เหลือ → แถวสุดท้าย "อื่น ๆ รวม" (ยอด K ครบเสมอ)
+    คืนจำนวนแถวที่เขียน"""
+    exps = [e for e in (expenses or []) if not e.get("deleted_at")]
+    cash = [e for e in exps if (e.get("pay_method") or "cash") == "cash"]
+    non = [e for e in exps if (e.get("pay_method") or "cash") != "cash"]
+    cap = len(EXP_ROWS)
+    non_slots = len(non) if len(cash) + len(non) <= cap else (1 if non else 0)
+    cash_cap = cap - non_slots
+    if len(cash) > cash_cap:
+        rest = cash[cash_cap - 1:]
+        cash = cash[:cash_cap - 1] + [{"item": "อื่น ๆ รวม %d รายการ" % len(rest),
+                                      "amount": sum(_num(e.get("amount")) for e in rest)}]
+    rows = list(EXP_ROWS)
+    for row, e in zip(rows, cash):
+        P.set("G%d" % row, F.norm(e.get("item")))
+        P.set("K%d" % row, _num(e.get("amount")))
+    P.expense_noncash = _num(sum(_num(e.get("amount")) for e in non))
+    P.expense_noncash_count = len(non)
+    nrows = rows[len(cash):]
+    if non and non_slots == len(non):
+        for row, e in zip(nrows, non):
+            how = PAY_LABEL.get(e.get("pay_method"), str(e.get("pay_method")))
+            P.set("G%d" % row, "%s (%s %s · ไม่หักลิ้นชัก)" % (F.norm(e.get("item")), how, _money_text(e.get("amount"))))
+            P.comment("G%d" % row, NOTE_NONCASH_EXP % how)
+    elif non:
+        row = nrows[0]
+        P.set("G%d" % row, "โอน/บัตร %d รายการ %s (ไม่หักลิ้นชัก)" % (len(non), _money_text(P.expense_noncash)))
+        P.comment("G%d" % row, NOTE_NONCASH_EXP % "เงินโอน/บัตรเครดิต")
+    if non:
+        P.notes.append("ค่าใช้จ่ายโอน/บัตร %d รายการ %s บาท ไม่ลงยอด K (ไม่หักลิ้นชัก)"
+                       % (len(non), _money_text(P.expense_noncash)))
+    return len(cash) + non_slots
 
 
 def _alloc(lines, money, fill_short=True):
@@ -692,14 +741,7 @@ def build_plan(ex, detail, day, full_name=None):
         P.other_net = _num(P.other_net + amt)
 
     # ---- ค่าใช้จ่าย / เงินสด / ผู้จัดทำ ----
-    exps = [e for e in (detail.get("expenses") or []) if not e.get("deleted_at")]
-    if len(exps) > len(EXP_ROWS):
-        rest = exps[len(EXP_ROWS) - 1:]
-        exps = exps[:len(EXP_ROWS) - 1] + [{"item": "อื่น ๆ รวม %d รายการ" % len(rest),
-                                            "amount": sum(_num(e.get("amount")) for e in rest)}]
-    for row, e in zip(EXP_ROWS, exps):
-        P.set("G%d" % row, F.norm(e.get("item")))
-        P.set("K%d" % row, _num(e.get("amount")))
+    exps = plan_expenses(P, detail.get("expenses"))
     if has_round:
         flt = rnd.get("float_amount")
         flt = DEFAULT_FLOAT if flt is None else _num(flt)
@@ -719,7 +761,7 @@ def build_plan(ex, detail, day, full_name=None):
 
     P.stats = {"iv": min(len(ex["ivs"]), len(IV_ROWS)), "ai": min(len(ai_rows), len(AI_ROWS)),
                "sr": min(len(ex["srs"]), len(SR_ROWS)), "paid": min(len(paid_rows), len(bill_rows)),
-               "expenses": len(exps), "other_cash": len(others), "no_channel": sum(1 for t in P.comments.values()
+               "expenses": exps, "expenses_noncash": P.expense_noncash_count, "other_cash": len(others), "no_channel": sum(1 for t in P.comments.values()
                                                        if NOTE_NO_CHANNEL in t),
                "round": rnd.get("status") if has_round else None}
     return P

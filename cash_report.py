@@ -73,7 +73,7 @@ def summarize(plan, ex=None):
     paid_bill = _sum(plan, XL.PAID_ROWS, "H")     # H110 ยอดรวมบิลที่วางบิลชำระ
     paid_cash = _sum(plan, XL.PAID_ROWS, "J")     # J110 ส่วนเงินสด
     paid_xfer = _sum(plan, XL.PAID_ROWS, "D")     # D = ยอดโอนเข้าบัญชีของแถววางบิล
-    expense = _sum(plan, XL.EXP_ROWS, "K")        # K130
+    expense = _sum(plan, XL.EXP_ROWS, "K")        # K130 — sql/020: เงินสดเท่านั้น (โอน/บัตรไม่ลงช่อง K)
     r = lambda v: round(v, 2)
     out = {
         "version": VERSION,
@@ -83,6 +83,8 @@ def summarize(plan, ex=None):
         "c114": iv["H"], "c115": iv["I"], "c116": iv["F"],
         "c117": ai["F"], "c118": ai["H"], "c119": ai["I"],
         "c120": paid_cash, "c121": sr["F"], "c122": expense,
+        # sql/020: ค่าใช้จ่ายโอน/บัตรเครดิต (ไม่อยู่ใน C122/C124 · ประกอบเท่านั้น)
+        "expense_noncash": round(float(getattr(plan, "expense_noncash", 0) or 0), 2),
         # sql/016: แถวเงินสดรับ/จ่ายอื่นอยู่ใน J110 ด้วย (ตรง Excel) · c120_bill = เฉพาะวางบิล
         "c120_bill": r(paid_cash - float(getattr(plan, "other_net", 0) or 0)),
         "other_cash_net": r(float(getattr(plan, "other_net", 0) or 0)),
@@ -194,7 +196,11 @@ def _detail_stamp(detail):
     #   ใหม่กว่าการเปลี่ยนล่าสุด ไม่งั้น cash_submit ตอบ CR001 ค้าง (รีวิวรอบ 2)
     docs = sorted((d.get("doc_no"), d.get("channel"), d.get("cash_amount"), d.get("noncash_channel"),
                    d.get("amount_now"), d.get("carried"), d.get("chosen_at")) for d in detail.get("docs") or [])
-    exps = sorted((e.get("id"), e.get("amount"), e.get("deleted_at")) for e in detail.get("expenses") or [])
+    # sql/020: วิธีจ่ายเปลี่ยน (เงินสด ↔ โอน/บัตร) → C122 เปลี่ยน ต้อง push ใหม่
+    #   ต่อท้ายเฉพาะแถวที่ไม่ใช่เงินสด — stamp ของวันเดิม (เงินสดทั้งหมด) ไม่เปลี่ยน ไม่ push ซ้ำทั้งหน้าต่าง
+    exps = sorted((e.get("id"), e.get("amount"), e.get("deleted_at"))
+                  + (((e.get("pay_method"),) if (e.get("pay_method") or "cash") != "cash" else ()))
+                  for e in detail.get("expenses") or [])
     oth = sorted((o.get("id"), o.get("direction"), o.get("amount")) for o in detail.get("other_cash") or [])
     blob = json.dumps([rnd.get("id"), rnd.get("status"), rnd.get("cut_at"), docs, exps, oth], default=str, ensure_ascii=False)
     return hashlib.sha1(blob.encode("utf-8")).hexdigest()[:16]

@@ -113,6 +113,63 @@ class OtherCashTest(unittest.TestCase):
         self.assertNotEqual(a, b)                 # เพิ่มเงินสดอื่น → push สรุปใหม่
 
 
+class ExpensePayMethodTest(unittest.TestCase):
+    """sql/020: เฉพาะค่าใช้จ่ายเงินสดลงช่อง K (→ C122/C124) · โอน/บัตรลงชื่อใน G ไม่ลงยอด"""
+
+    def _plan(self, expenses):
+        p = XL.Plan()
+        n = XL.plan_expenses(p, expenses)
+        p.stats = {"expenses": n}
+        return p, n
+
+    def test_bk_case_credit_card_not_in_k(self):
+        p, n = self._plan([
+            {"id": 50, "item": "น้ำดื่ม/น้ำแข็ง", "amount": 90, "pay_method": "cash"},
+            {"id": 51, "item": "ค่าน้ำมันรถ Triton บค.5210", "amount": 1000, "pay_method": "credit_card"},
+            {"id": 52, "item": "ค่านมสุนัข", "amount": 66},                       # ไม่มีคีย์ (cash-app ก่อน 020) = เงินสด
+            {"id": 53, "item": "ค่าส่งของ", "amount": 200, "pay_method": "transfer"},
+            {"id": 54, "item": "ลบแล้ว", "amount": 9, "pay_method": "credit_card", "deleted_at": "x"}])
+        self.assertEqual(n, 4)
+        self.assertEqual((p.cells["G114"], p.cells["K114"]), ("น้ำดื่ม/น้ำแข็ง", 90))
+        self.assertEqual((p.cells["G115"], p.cells["K115"]), ("ค่านมสุนัข", 66))
+        self.assertEqual(p.cells["G116"], "ค่าน้ำมันรถ Triton บค.5210 (บัตรเครดิต 1,000.00 · ไม่หักลิ้นชัก)")
+        self.assertEqual(p.cells["G117"], "ค่าส่งของ (เงินโอน 200.00 · ไม่หักลิ้นชัก)")
+        self.assertNotIn("K116", p.cells)
+        self.assertNotIn("K117", p.cells)
+        self.assertIn("ไม่ลงยอดช่อง K", p.comments["G116"])
+        self.assertEqual((p.expense_noncash, p.expense_noncash_count), (1200, 2))
+        s = R.summarize(p)
+        self.assertEqual(s["c122"], 156)
+        self.assertEqual(s["expense_noncash"], 1200)
+
+    def test_all_cash_same_as_before(self):
+        p, n = self._plan([{"item": "a", "amount": 10}, {"item": "b", "amount": 20.5, "pay_method": "cash"}])
+        self.assertEqual(n, 2)
+        self.assertEqual(R.summarize(p)["c122"], 30.5)
+        self.assertEqual(p.comments, {})
+        self.assertEqual(p.notes, [])
+
+    def test_overflow_keeps_cash_total(self):
+        exps = [{"item": "c%d" % i, "amount": 10} for i in range(17)] + \
+               [{"item": "n1", "amount": 300, "pay_method": "credit_card"},
+                {"item": "n2", "amount": 50, "pay_method": "transfer"}]
+        p, n = self._plan(exps)
+        self.assertEqual(n, 16)
+        self.assertEqual(R.summarize(p)["c122"], 170)                    # ยอดเงินสดครบ 17 รายการ
+        self.assertTrue(p.cells["G128"].startswith("อื่น ๆ รวม 3 รายการ"))
+        self.assertEqual(p.cells["K128"], 30)
+        self.assertEqual(p.cells["G129"], "โอน/บัตร 2 รายการ 350.00 (ไม่หักลิ้นชัก)")
+        self.assertNotIn("K129", p.cells)
+
+    def test_stamp_changes_only_when_method_changes(self):
+        base = {"round": {"id": 1, "status": "submitted"}, "docs": [], "other_cash": []}
+        old = dict(base, expenses=[{"id": 1, "amount": 1000}])                         # cash-app ก่อน 020
+        new_cash = dict(base, expenses=[{"id": 1, "amount": 1000, "pay_method": "cash"}])
+        new_cc = dict(base, expenses=[{"id": 1, "amount": 1000, "pay_method": "credit_card"}])
+        self.assertEqual(R._detail_stamp(old), R._detail_stamp(new_cash))             # ไม่ push ซ้ำทั้งหน้าต่าง
+        self.assertNotEqual(R._detail_stamp(new_cash), R._detail_stamp(new_cc))
+
+
 class MockRPC(object):
     def __init__(self, missing=False):
         self.calls, self.missing = [], missing
