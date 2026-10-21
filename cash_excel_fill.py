@@ -447,6 +447,11 @@ def _alloc(lines, money, fill_short=True):
     return out
 
 
+def _iv_base(d, doc_no):
+    """เลข IV ของแถว IV ในแอป — งวดที่ 2+ (sql/019) มีเลขเอกสาร IV…/2 · ใช้ iv_no ถ้า API ส่งมา"""
+    return ((d or {}).get("iv_no") or (doc_no or "").split("/")[0]).strip()
+
+
 def build_plan(ex, detail, day, full_name=None):
     """ex = load_express(), detail = cash_round_detail() (None/{} ได้) → Plan"""
     P = Plan()
@@ -464,7 +469,8 @@ def build_plan(ex, detail, day, full_name=None):
     re_nos = set(ex["res"]) | {k for k, d in docs.items() if d.get("doc_type") == "RE"}
     # ใบเสร็จที่ชำระเฉพาะ IV ที่พนักงานลงว่าจ่ายแล้วในแอป (doc_type IV · sql/009) — เงินนับจากใบ IV แล้ว
     #   ไม่นับใบเสร็จซ้ำ (รีวิว 18 ต.ค. 69: SKN 17/10 ยอดเบิ้ล 2 เท่า)
-    iv_docs = {k for k, d in docs.items() if d.get("doc_type") == "IV" and d.get("channel")}
+    #   019 (21 ต.ค. 69): IV รับหลายงวด — งวดที่ 2+ มีเลข IV…/2 → จับคู่ด้วยเลข IV (iv_no / ตัด /n) ไม่ใช่ doc_no
+    iv_docs = {_iv_base(d, k) for k, d in docs.items() if d.get("doc_type") == "IV" and d.get("channel")}
     def _covered(re_no):
         ivl = [ln for ln in ex["lines"].get(re_no, []) if ln["rectyp"] == "3"]
         return bool(ivl) and all(ln["doc_no"] in iv_docs for ln in ivl)
@@ -520,18 +526,21 @@ def build_plan(ex, detail, day, full_name=None):
     for k, d in sorted(docs.items()):
         if d.get("doc_type") != "IV":
             continue
+        # 019: งวดที่ 2+ (IV…/2) = เงินอีกครั้งของ IV เดิม → แถว/จับคู่ใช้เลข IV · ยอด = ยอดงวด (ไม่ปัดเป็น NETAMT)
+        iv_no = _iv_base(d, k)
         # ยอดใช้ NETAMT ของ IV ใน Express (Finny T9: IV6905066 AMOUNT 6,682.60 / NETAMT 6,682) ถ้าหาเจอ
-        ivr = next((r for r in ex["ivs"] if (r.get("DOCNUM") or "").strip() == k), None) or ex["iv_index"].get(k)
+        ivr = None if iv_no != k else (
+            next((r for r in ex["ivs"] if (r.get("DOCNUM") or "").strip() == k), None) or ex["iv_index"].get(k))
         amt = _num(d.get("amount_now"))
         if ivr and abs(_num(ivr.get("NETAMT")) - amt) < 1:   # ต่างแค่เศษสตางค์ (AMOUNT vs NETAMT) → NETAMT
             amt = _num(ivr.get("NETAMT"))
         m = _money_of(dict(d, amount_now=amt) if d.get("channel") != "mixed" else d, amt)
         if m is None:
             continue
-        if k in day_iv:
-            same_day_pay.setdefault(k, []).append((k, m[0], m[1], m[2], 0.0))
+        if iv_no in day_iv:
+            same_day_pay.setdefault(iv_no, []).append((k, m[0], m[1], m[2], 0.0))
         else:
-            paid_rows.append((k, k, amt, m[0], m[1], m[2], 0.0, bool(d.get("carried"))))
+            paid_rows.append((k, iv_no, amt, m[0], m[1], m[2], 0.0, bool(d.get("carried"))))
 
     # ---- แถว 3–62: IV ของวัน ----
     if len(ex["ivs"]) > len(IV_ROWS):

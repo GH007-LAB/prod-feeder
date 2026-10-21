@@ -143,7 +143,8 @@ def _round_scope(ex, detail, src):
     in_round |= {k for k, v in ex["res"].items() if XL._num(v.get("NETAMT")) <= 0}
     # ใบเสร็จที่ชำระ IV ซึ่งพนักงานลงว่าจ่ายแล้วในรอบนี้ (doc_type IV) ก็อยู่ในรอบ — เงินนับจากใบ IV
     #   แต่ SR ที่ใบเสร็จนั้นหักไว้ (เช่น %ช่าง BK 17/10 SR0005167 ใน RE0061962) ต้องยังนับ (ตรวจกับ production 18 ต.ค.)
-    iv_docs = {d.get("doc_no") for d in detail.get("docs") or [] if d.get("doc_type") == "IV"}
+    #   019: งวดที่ 2+ ของ IV มีเลข IV…/2 → เทียบด้วยเลข IV (ARRCPIT อ้างเลข IV)
+    iv_docs = {XL._iv_base(d, d.get("doc_no")) for d in detail.get("docs") or [] if d.get("doc_type") == "IV"}
     in_round |= {rn for rn, ls in (ex.get("lines") or {}).items()
                  if any(ln["rectyp"] == "3" and ln["doc_no"] in iv_docs for ln in ls)}
     netted = {}
