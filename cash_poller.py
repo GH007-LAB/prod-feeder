@@ -177,6 +177,18 @@ def run_once(cfgs=None, root=None):
                       % (br, r["round_id"], type(e).__name__, e))
                 summary["cut_failed"].append(r["round_id"])
 
+    # ---- 2b) ใบที่คีย์หลังส่งรอบ → ผูกเข้ารอบของวันที่ใบ (sql/019 · CTO 21 ต.ค. 69) ----
+    #   เดิมใบพวกนี้ถูกยกไปนับรอบถัดไป (เงินนับซ้ำ/คนละวันกับ Excel) · RPC ยังไม่มี = ยังไม่รัน 019 → ข้ามเงียบ
+    try:
+        late = F.RPC(any_cfg, "cash_attach_late_docs", {}) or {}
+        if late.get("attached"):
+            S.log("CASH_LATE: ผูกใบหลังส่งรอบ %s ใบ %s" % (late.get("attached"), late.get("by_branch")))
+            summary["late_attached"] = late.get("attached")
+    except F.RpcMissing:
+        pass
+    except Exception as e:
+        S.log("ERROR: CASH_POLLER ผูกใบหลังส่งรอบไม่สำเร็จ %s: %s" % (type(e).__name__, e))
+
     # ---- 3) ส่งออก out.json ----
     exports = tick.get("to_export") or []
     if exports:

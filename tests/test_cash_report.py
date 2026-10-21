@@ -48,6 +48,16 @@ class SummarizeTest(unittest.TestCase):
         self.assertEqual(s["sr_cash_refund"], 300)
         json.dumps(s)   # serialise ได้
 
+    def test_srs_list_per_doc(self):
+        # 6 (sql/019): SR ทีละใบ — ช่องที่ลง = แบบที่คืน (F สด · G ลดหนี้ · H โอน · I QR)
+        p = plan_with({"A75": "SR1", "F75": 300, "A76": "SR2", "C76": "IV9", "G76": 1641, "A77": "SR3", "H77": 20})
+        p.comments["A75"] = "คืนสินค้า หักในใบเสร็จ RE1\nบรรทัดสอง"
+        s = R.summarize(p)
+        self.assertEqual(s["srs"], [
+            {"doc_no": "SR1", "iv_no": None, "amount": 300, "refund": "cash_refund", "note": "คืนสินค้า หักในใบเสร็จ RE1"},
+            {"doc_no": "SR2", "iv_no": "IV9", "amount": 1641, "refund": "credit", "note": None},
+            {"doc_no": "SR3", "iv_no": None, "amount": 20, "refund": "transfer", "note": None}])
+
     def test_app_cash_counts_re_ai_iv(self):
         det = {"docs": [
             {"doc_no": "RE1", "doc_type": "RE", "channel": "cash", "amount_now": 100},

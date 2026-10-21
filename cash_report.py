@@ -27,7 +27,7 @@ import so_push as S
 import cash_feed as F
 import cash_excel_fill as XL
 
-VERSION = 5  # 4: ใบเสร็จชำระ IV ที่ลงจ่ายแล้วอยู่ในรอบ · 5: เงินสดรับ/จ่ายอื่น (sql/016) — c120 รวม · c120_bill ไม่รวม · cash_adjust คิดจาก c120_bill
+VERSION = 6  # 6: รายการ SR ทีละใบ (srs) ให้ out.json (sql/019) · 4: ใบเสร็จชำระ IV ที่ลงจ่ายแล้วอยู่ในรอบ · 5: เงินสดรับ/จ่ายอื่น (sql/016) — c120 รวม · c120_bill ไม่รวม · cash_adjust คิดจาก c120_bill
 
 # ฟอร์ม Excel มีแถวจำกัด (IV 60 · AI 8 · SR 7 · วางบิล 20 · ค่าใช้จ่าย 16) — build_plan ตัดท้ายเมื่อเกิน
 # สรุปรายวันต้องรวมครบทุกใบ (SKN 14/10: SR 11 ใบ วางบิล 40 รายการ) จึงคำนวณด้วยช่วงแถวเสมือนที่ไม่ชนกัน
@@ -94,6 +94,18 @@ def summarize(plan, ex=None):
         "notes": list(plan.notes)[:20],
     }
     out["sr_cash_refund"] = sr["F"]
+    # 6 (sql/019): SR ทีละใบตามแถว 75–81 — ช่องที่ลงบอกว่าคืนแบบไหน (Finny ใช้เทียบ statement/ลิ้นชัก)
+    kinds = {"F": "cash_refund", "G": "credit", "H": "transfer", "I": "qr"}
+    out["srs"] = []
+    for row in XL.SR_ROWS:
+        no = plan.cells.get("A%d" % row)
+        if not no:
+            continue
+        col = next((c for c in "FGHI" if isinstance(plan.cells.get("%s%d" % (c, row)), (int, float))), None)
+        out["srs"].append({"doc_no": no, "iv_no": plan.cells.get("C%d" % row),
+                           "amount": plan.cells.get("%s%d" % (col, row)) if col else None,
+                           "refund": kinds.get(col),
+                           "note": (plan.comments.get("A%d" % row) or "").split("\n")[0] or None})
     if ex is not None:
         out["sr_count"] = len(ex.get("srs") or [])
         out["sr_comm_count"] = len(ex.get("sr_comm") or ())
