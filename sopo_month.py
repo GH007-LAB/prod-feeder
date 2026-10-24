@@ -48,6 +48,19 @@ def months_window(today, n):
     return ks
 
 
+REINVOICE_FROM = datetime.date(2026, 10, 1)  # ไม่แก้เดือนก่อนหน้า (Bonus race ปิดไปแล้ว)
+
+
+def is_reinvoice(branch, seg, youref, dat):
+    """IV ออนไลน์ที่ SKN ออกแทนสาขาอื่น (YOUREF "วันที่ 09/10/69 บึงก" / "… โพนพ") — สาขานั้นออก HS
+    ยอดเดียวกันเองอยู่แล้ว นับยอดเงินทั้งคู่ = ซ้ำ (ต.ค. 69 ซ้ำ 8.3 แสน · CTO 24 ต.ค. 69 ให้ตัดฝั่ง SKN)
+    ตัดเฉพาะยอดเงิน (online_tot / day_tot) — บรรทัดสินค้ายังนับ เพราะ Express ตัดสต็อก SKN จริง"""
+    if branch != "SKN" or seg != "online" or dat < REINVOICE_FROM:
+        return False
+    ref = (youref or "").replace("\xa0", " ")
+    return "บึง" in ref or "โพน" in ref
+
+
 def segment(cuscod, name):
     c = (cuscod or "").strip()
     if re.sub(r"^[^0-9]+", "", c).startswith(_IBNUM):
@@ -167,7 +180,7 @@ def main():
 
     for r in S.read_dbf(os.path.join(src, "ARTRN.DBF"),
                         fields={"RECTYP", "DOCNUM", "DOCDAT", "SONUM", "SLMCOD", "CUSCOD",
-                                "NETAMT", "ADVAMT", "DOCSTAT"}):
+                                "NETAMT", "ADVAMT", "DOCSTAT", "YOUREF"}):
         dat = r.get("DOCDAT")
         if not dat:
             continue
@@ -217,15 +230,18 @@ def main():
                     b["interbranch_tot"] += v
             else:
                 # ยอดรายวัน (หน้าร้าน+ออนไลน์) = ตัวเดียวกับ _tot[b][0]+_tot[b][1] ของ legacy
-                dk = str(dat.day)
-                dm = day_m.setdefault(mk, {})
-                dm[dk] = round(dm.get(dk, 0.0) + v, 2)
+                reinv = is_reinvoice(branch, seg, r.get("YOUREF"), dat)
+                if not reinv:
+                    dk = str(dat.day)
+                    dm = day_m.setdefault(mk, {})
+                    dm[dk] = round(dm.get(dk, 0.0) + v, 2)
                 sale_docs[doc] = (mk, dat, seg == "regular")
                 # หัวบิล → ใช้ทำ "บิลปิดยอดเยี่ยม/บิลคอยล์" (จอเดิม reports 💎/🪙)
                 bill_info[doc] = [mk, sc, (names.get(cc, "") or cc or "")[:24], round(v, 2)]
                 if seg == "online":
-                    for b in bb:
-                        b["online_tot"] += v
+                    if not reinv:  # SKN ออกแทน BK/PPS — ยอดเงินนับที่ HS ของสาขานั้น
+                        for b in bb:
+                            b["online_tot"] += v
                 else:
                     for b in bb:
                         b["sales_tot"] += v

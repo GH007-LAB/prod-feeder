@@ -165,7 +165,7 @@ def main():
     sr_mk = {}  # เอกสาร SR -> month (ไว้รวมบรรทัดใน STCRD เทียบ ret+comm+plat)
     for r in S.read_dbf(os.path.join(src, "ARTRN.DBF"),
                         fields={"RECTYP", "DOCNUM", "DOCDAT", "CUSCOD", "NETAMT", "ADVAMT",
-                                "DISCAMT", "SLMCOD", "DOCSTAT"}):
+                                "DISCAMT", "SLMCOD", "DOCSTAT", "YOUREF"}):
         dat = r.get("DOCDAT")
         if not dat:
             continue
@@ -184,6 +184,10 @@ def main():
             cc = (r.get("CUSCOD") or "").strip()
             v = net + float(r.get("ADVAMT") or 0)  # ยอดเต็ม build_all.py:217
             seg = segment(cc, names.get(cc, ""))
+            ref = (r.get("YOUREF") or "").replace("\xa0", " ")
+            if (branch == "SKN" and seg == "online" and dat >= datetime.date(2026, 10, 1)
+                    and ("บึง" in ref or "โพน" in ref)):
+                continue  # IV ที่ SKN ออกแทน BK/PPS — ยอดเงินนับที่ HS ของสาขานั้น (sopo_month.is_reinvoice)
             exp[mk][seg] += v
             if seg != "interbranch":
                 exp_day[mk][str(dat.day)] += v
