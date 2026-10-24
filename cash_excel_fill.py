@@ -180,12 +180,15 @@ def load_express(src, day, extra_re=()):
     fields = {"RECTYP", "DOCNUM", "DOCDAT", "CUSCOD", "AREACOD", "ADVNUM", "ADVAMT", "NETAMT",
               "DOCSTAT", "YOUREF", "SONUM"}
     ivs, ais, srs, res = [], [], [], {}
+    re_date = {}  # เลข RE → วันที่ใบเสร็จ (ใช้คิดยอดที่ IV ถูกชำระ "ณ วันนั้น")
     want_re = set(extra_re)
     for r in S.read_dbf(artrn, fields=fields):
         t = (r.get("RECTYP") or "").strip()
         doc = (r.get("DOCNUM") or "").strip()
         if not doc or (r.get("DOCSTAT") or "").strip() == F.CANCELLED:
             continue
+        if t == "9":
+            re_date[doc] = r.get("DOCDAT")
         if r.get("DOCDAT") == day:
             if t == "3":
                 ivs.append(r)
@@ -197,6 +200,14 @@ def load_express(src, day, extra_re=()):
                 res[doc] = r
         if t == "9" and doc in want_re and doc not in res:
             res[doc] = r
+    # IV ต้นทางของ SR วันนี้ (SONUM ก่อน แล้ว YOUREF) — ใช้ดูว่าเคยเก็บเงินหรือยัง ณ วันนั้น (24 ต.ค. 69)
+    sr_ref = {}
+    for r in srs:
+        m = _IV_RE.search(r.get("SONUM") or "") or _IV_RE.search(r.get("YOUREF") or "")
+        if m:
+            sr_ref[(r.get("DOCNUM") or "").strip()] = m.group(0)
+    ref_ivs = set(sr_ref.values())
+    paid_asof = {}  # IV → ยอดที่ RE ลงวันที่ ≤ day ชำระไว้ (ไม่ใช้ RCVAMT ปัจจุบัน — จ่ายวันหลังแล้วรายงานวันนี้ต้องไม่พลิก)
     # รายการชำระของ RE
     lines = {}
     rc = _find(src, "ARRCPIT.DBF")
@@ -204,6 +215,11 @@ def load_express(src, day, extra_re=()):
         need = set(res) | want_re
         for r in S.read_dbf(rc, fields={"RCPNUM", "DOCNUM", "RECTYP", "RCVAMT"}):
             rcp = (r.get("RCPNUM") or "").strip()
+            dn = (r.get("DOCNUM") or "").strip()
+            if dn in ref_ivs and (r.get("RECTYP") or "").strip() == "3":
+                rd = re_date.get(rcp)
+                if rd is not None and rd <= day:
+                    paid_asof[dn] = paid_asof.get(dn, 0.0) + _num(r.get("RCVAMT"))
             if rcp in need:
                 lines.setdefault(rcp, []).append({
                     "doc_no": (r.get("DOCNUM") or "").strip(),
@@ -211,7 +227,8 @@ def load_express(src, day, extra_re=()):
                     "amount": _num(r.get("RCVAMT"))})
     # IV ที่ RE ชำระ (รวมใบวันก่อน ๆ)
     day_iv = {(r.get("DOCNUM") or "").strip() for r in ivs}
-    need_iv = {ln["doc_no"] for ls in lines.values() for ln in ls if ln["rectyp"] == "3"} - day_iv
+    need_iv = ({ln["doc_no"] for ls in lines.values() for ln in ls if ln["rectyp"] == "3"}
+               | ref_ivs) - day_iv
     iv_index = {}
     for r in ivs:
         iv_index[(r.get("DOCNUM") or "").strip()] = r
@@ -242,11 +259,17 @@ def load_express(src, day, extra_re=()):
     # ชนิด SR ของวันนี้ + SR ที่ใบเสร็จของวันนี้/ยกมาหักไว้ (อาจลงวันอื่น) — ใช้ตัดสินช่องและการเติมส่วนขาด
     sr_kind = sr_kinds(src, {(r.get("DOCNUM") or "").strip() for r in srs}
                        | {ln["doc_no"] for ls in lines.values() for ln in ls if ln["rectyp"] == "5"})
+    # SR ที่ IV ต้นทางยังไม่มีเงินเข้าเลย ณ วันนั้น (ไม่มี RE ชำระ ≤ day และไม่ได้ตัดมัดจำ) = ลดหนี้ ไม่มีเงินคืนจากลิ้นชัก
+    #   BK 24 ต.ค. 69: IV6905179 2,070 เปิดแล้วลดหนี้ SR0005176 (ของแตกระหว่างส่ง) → เดิมนับเป็นจ่ายคืนสด เกิน 2,070
+    #   ADVAMT > 0 = ลูกค้าจ่ายมัดจำไว้แล้ว (เช่น SKN IV6903901 NETAMT 0) → ยังถือว่าเคยจ่าย
+    sr_ref_unpaid = {sr for sr, iv in sr_ref.items()
+                     if iv in iv_index and paid_asof.get(iv, 0.0) <= 0.005
+                     and _num(iv_index[iv].get("ADVAMT")) <= 0.005}
     key = lambda r: (r.get("DOCNUM") or "")
     return {"day": day, "ivs": sorted(ivs, key=key), "ais": sorted(ais, key=key),
             "srs": sorted(srs, key=key), "res": res, "lines": lines, "iv_index": iv_index,
             "customers": customers, "areas": areas, "has_arrcpit": S._file_exists(rc),
-            "sr_kind": sr_kind,
+            "sr_kind": sr_kind, "sr_ref_unpaid": sr_ref_unpaid,
             "sr_comm": {d for d, k in sr_kind.items() if k == "contractor"}}
 
 
@@ -674,6 +697,7 @@ def build_plan(ex, detail, day, full_name=None):
         #   คอมแพลตฟอร์ม/คืนเงินออนไลน์ หัก    → ช่องเดียวกับใบเสร็จ (เดิม) · ไม่หัก → G — ไม่ใช่เงินจากลิ้นชัก
         #   คืนสินค้า หักในใบเสร็จเงินสด → F · หักในใบเสร็จโอน/QR → G (ลูกค้าจ่ายสุทธิ ไม่มีเงินออก)
         #   คืนสินค้า ไม่ได้หักในใบเสร็จ        → F (จ่ายคืนเงินสด)
+        #     ยกเว้น IV ต้นทางยังไม่เคยรับชำระ  → G (ลดหนี้ ไม่มีเงินคืน · 24 ต.ค. 69)
         #   ช่องทางใบเสร็จ: ตามที่เลือกในแอป · ยังไม่เลือก = เดาจาก YOUREF ของ Express (KSME/KSHOP/QR = ไม่ใช่เงินสด)
         sr_no = (r.get("DOCNUM") or "").strip()
         # หาใบเสร็จที่หัก SR จาก ARRCPIT ตรง ๆ (sr_col ข้ามใบเสร็จยอด ≤ 0 เช่น RE จ่ายค่า%ช่าง −200)
@@ -692,7 +716,7 @@ def build_plan(ex, detail, day, full_name=None):
             else:
                 col = "G" if noncash else "F"
         else:
-            col = "F" if kind == "goods" else "G"
+            col = "F" if kind == "goods" and sr_no not in ex.get("sr_ref_unpaid", ()) else "G"
         P.set("%s%d" % (col, row), _num(r.get("NETAMT")))
         label = {"contractor": "%ช่าง", "platform": "คอมแพลตฟอร์ม", "goods": "คืนสินค้า"}[kind]
         P.comment("A%d" % row, label + (" หักในใบเสร็จ %s" % by_re if by_re else "")
