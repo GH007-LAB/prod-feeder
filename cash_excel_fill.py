@@ -356,7 +356,26 @@ def fetch_round(cfg, branch, day):
     rid = (detail.get("round") or {}).get("id")
     if rid is not None:
         detail["other_cash"] = fetch_other_cash(cfg, rid)
+        detail["sr_methods"], detail["sr_methods_at"] = fetch_sr_methods(cfg, rid, with_at=True)
     return detail
+
+
+def fetch_sr_methods(cfg, round_id, with_at=False):
+    """027: วิธีจ่าย SR ที่พนักงานเลือกในรอบ {sr_no: 'cash'|'transfer'} · 404 (ยังไม่รัน sql/027) = {}"""
+    try:
+        rows = _rest_get(cfg, "/rest/v1/cash_sr_paymethod?round_id=eq.%d&select=sr_no,pay_method,chosen_at"
+                              "&order=sr_no" % int(round_id)) or []
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return ({}, {}) if with_at else {}
+        raise
+    m = {r["sr_no"]: r["pay_method"] for r in rows}
+    return (m, {r["sr_no"]: (r["pay_method"], r.get("chosen_at")) for r in rows}) if with_at else m
+
+
+def fetch_sr_methods_stamp(detail):
+    """ลายนิ้วมือการเลือก (รวม chosen_at — สลับไป-กลับในรอบ feeder เดียวก็ต้อง push ใหม่ ให้ basis_at ใหม่กว่า)"""
+    return sorted((detail.get("sr_methods_at") or {}).items())
 
 
 def fetch_other_cash(cfg, round_id):
@@ -435,6 +454,7 @@ class Plan(object):
         self.other_net = 0.0  # เงินสดรับ − จ่ายอื่น ที่ลงในแถววางบิล (sql/016) — สรุปแยกออกจาก C120 วางบิล
         self.expense_noncash = 0.0      # sql/020: ค่าใช้จ่ายโอน/บัตรเครดิต (ไม่ลงช่อง K · ไม่หักลิ้นชัก)
         self.expense_noncash_count = 0
+        self.sr_rows = []     # 027: SR ของวัน + ช่องที่ลง (base_col = ก่อนใช้วิธีจ่ายที่พนักงานเลือก) ให้หน้าแอปเลือก "โอน"
 
     def set(self, coord, value):
         if value is None or value == "":
@@ -717,10 +737,18 @@ def build_plan(ex, detail, day, full_name=None):
                 col = "G" if noncash else "F"
         else:
             col = "F" if kind == "goods" and sr_no not in ex.get("sr_ref_unpaid", ()) else "G"
+        # 027 (CTO 24 ต.ค. 69): ระบบนับว่าจ่ายเงินสดจากลิ้นชัก แต่พนักงานเลือกว่า "โอน" → ช่อง H (SR โอน) ไม่หักลิ้นชัก
+        #   เช่น SKN SR0003286 %ช่าง 1,026 หักในใบเสร็จ RE0027317 แต่โอนให้ช่าง
+        base_col = col
+        if col == "F" and ((detail or {}).get("sr_methods") or {}).get(sr_no) == "transfer":
+            col = "H"
+        P.sr_rows.append({"sr_no": sr_no, "amount": _num(r.get("NETAMT")), "kind": kind,
+                          "by_re": by_re, "base_col": base_col, "col": col})
         P.set("%s%d" % (col, row), _num(r.get("NETAMT")))
         label = {"contractor": "%ช่าง", "platform": "คอมแพลตฟอร์ม", "goods": "คืนสินค้า"}[kind]
         P.comment("A%d" % row, label + (" หักในใบเสร็จ %s" % by_re if by_re else "")
-                  + (" — จ่ายเงินสด" if col == "F" else " — ลดหนี้ ไม่จ่ายเงินสด" if col == "G" else " — ตามใบเสร็จ"))
+                  + (" — โอน (พนักงานเลือกในแอป)" if col != base_col else
+                     " — จ่ายเงินสด" if col == "F" else " — ลดหนี้ ไม่จ่ายเงินสด" if col == "G" else " — ตามใบเสร็จ"))
 
     # ---- แถว 90–109: วางบิลชำระแล้ว (RE วันนี้ที่ชำระ IV วันก่อน + RE ยกมา) ----
     # เงินสดรับ/จ่ายอื่น (sql/016) ใช้แถวท้ายของส่วนวางบิล — จองไว้ก่อน (ยอดที่ควรมีในชีตต้องครบเสมอ)

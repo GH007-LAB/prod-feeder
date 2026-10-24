@@ -27,7 +27,7 @@ import so_push as S
 import cash_feed as F
 import cash_excel_fill as XL
 
-VERSION = 6  # 6: SR คืนสินค้าที่ IV ต้นทางยังไม่มีเงินเข้า ณ วันนั้น = ลดหนี้ (G) ไม่ใช่จ่ายคืนสด (24 ต.ค. 69) · 4: ใบเสร็จชำระ IV ที่ลงจ่ายแล้วอยู่ในรอบ · 5: เงินสดรับ/จ่ายอื่น (sql/016) — c120 รวม · c120_bill ไม่รวม · cash_adjust คิดจาก c120_bill
+VERSION = 7  # 7: sr_rows + วิธีจ่าย SR ที่พนักงานเลือก (sql/027) · 6: 6: SR คืนสินค้าที่ IV ต้นทางยังไม่มีเงินเข้า ณ วันนั้น = ลดหนี้ (G) ไม่ใช่จ่ายคืนสด (24 ต.ค. 69) · 4: ใบเสร็จชำระ IV ที่ลงจ่ายแล้วอยู่ในรอบ · 5: เงินสดรับ/จ่ายอื่น (sql/016) — c120 รวม · c120_bill ไม่รวม · cash_adjust คิดจาก c120_bill
 
 # ฟอร์ม Excel มีแถวจำกัด (IV 60 · AI 8 · SR 7 · วางบิล 20 · ค่าใช้จ่าย 16) — build_plan ตัดท้ายเมื่อเกิน
 # สรุปรายวันต้องรวมครบทุกใบ (SKN 14/10: SR 11 ใบ วางบิล 40 รายการ) จึงคำนวณด้วยช่วงแถวเสมือนที่ไม่ชนกัน
@@ -96,6 +96,7 @@ def summarize(plan, ex=None):
         "notes": list(plan.notes)[:20],
     }
     out["sr_cash_refund"] = sr["F"]
+    out["sr_rows"] = list(getattr(plan, "sr_rows", []))   # 027: ไม่มีชื่อลูกค้า — เลขใบ/ยอด/ชนิด/ช่อง
     if ex is not None:
         out["sr_count"] = len(ex.get("srs") or [])
         out["sr_comm_count"] = len(ex.get("sr_comm") or ())
@@ -202,7 +203,12 @@ def _detail_stamp(detail):
                   + (((e.get("pay_method"),) if (e.get("pay_method") or "cash") != "cash" else ()))
                   for e in detail.get("expenses") or [])
     oth = sorted((o.get("id"), o.get("direction"), o.get("amount")) for o in detail.get("other_cash") or [])
-    blob = json.dumps([rnd.get("id"), rnd.get("status"), rnd.get("cut_at"), docs, exps, oth], default=str, ensure_ascii=False)
+    blob = [rnd.get("id"), rnd.get("status"), rnd.get("cut_at"), docs, exps, oth]
+    # 027: วิธีจ่าย SR เปลี่ยน → C121/H เปลี่ยน ต้อง push ใหม่ · ต่อท้ายเฉพาะเมื่อมีการเลือก (stamp วันเดิมไม่เปลี่ยน)
+    srm = XL.fetch_sr_methods_stamp(detail) or sorted((detail.get("sr_methods") or {}).items())
+    if srm:
+        blob.append(srm)
+    blob = json.dumps(blob, default=str, ensure_ascii=False)
     return hashlib.sha1(blob.encode("utf-8")).hexdigest()[:16]
 
 
